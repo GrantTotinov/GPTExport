@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "GPTExport",
+  "version": "0.1.0",
+  "description": "Copy AI conversations as clean Markdown.",
+  "permissions": [
+    "clipboardWrite"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ]
+}

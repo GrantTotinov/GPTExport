@@ -49,11 +49,6 @@ function getVisibleMessages(): Message[] {
             continue;
         }
 
-        /*
-         * User messages don't currently expose the same
-         * data-message-id attribute, so we use the element
-         * itself as the visible message.
-         */
         result.push({
             id: `user-${content}`,
             role: "user",
@@ -98,7 +93,6 @@ async function wait(ms: number): Promise<void> {
 
 async function loadEntireConversation(): Promise<Message[]> {
     const collected = new Map<string, Message>();
-    let nextOrder = 0;
 
     const scrollContainer = document.querySelector<HTMLElement>(
         "[data-scroll-root]"
@@ -111,58 +105,181 @@ async function loadEntireConversation(): Promise<Message[]> {
 
     console.log("GPTExport: scroll container found");
 
-    let previousScrollTop = -1;
-    let topStableIterations = 0;
+    let userCounter = 0;
 
-    for (let iteration = 0; iteration < 100; iteration++) {
+    /*
+     * Keep a private identity for every user DOM element
+     * we encounter.
+     */
+    const userIds = new WeakMap<Element, string>();
 
-        // Collect everything currently rendered.
-        const visibleMessages = getVisibleMessages();
+    function getMessageElements(): Element[] {
+        return Array.from(
+            document.querySelectorAll(
+                '[data-message-author-role="assistant"], .user-message-bubble-color'
+            )
+        );
+    }
 
-        for (const message of visibleMessages) {
+    function getMessageId(element: Element): string | null {
+        const assistantId =
+            element.getAttribute("data-message-id");
+
+        if (assistantId) {
+            return assistantId;
+        }
+
+        /*
+         * User messages don't expose data-message-id.
+         *
+         * Assign an internal ID to this DOM element.
+         */
+        if (!userIds.has(element)) {
+            userIds.set(element, `user-${userCounter++}`);
+        }
+
+        return userIds.get(element)!;
+    }
+
+    function getMessage(element: Element): Message | null {
+        const isAssistant = element.matches(
+            '[data-message-author-role="assistant"]'
+        );
+
+        const role: Message["role"] = isAssistant
+            ? "assistant"
+            : "user";
+
+        const id = getMessageId(element);
+
+        if (!id) {
+            return null;
+        }
+
+        let content: string | undefined;
+
+        if (isAssistant) {
+            content = element
+                .querySelector(".markdown")
+                ?.textContent
+                ?.trim();
+        } else {
+            content = element.textContent?.trim();
+        }
+
+        if (!content) {
+            return null;
+        }
+
+        return {
+            id,
+            role,
+            content,
+            order: 0
+        };
+    }
+
+    /*
+     * Store pairwise ordering information.
+     *
+     * A -> B means A appears before B in the DOM.
+     */
+    const before = new Map<string, Set<string>>();
+
+    function collectVisibleMessages() {
+        const elements = getMessageElements();
+
+        const visible: {
+            message: Message;
+            element: Element;
+            top: number;
+        }[] = [];
+
+        for (const element of elements) {
+            const message = getMessage(element);
+
+            if (!message) {
+                continue;
+            }
+
             if (!collected.has(message.id)) {
-                collected.set(message.id, {
-                    ...message,
-                    order: nextOrder++
-                });
-        
+                collected.set(message.id, message);
+
                 console.log(
                     "GPTExport: collected",
                     message.role,
-                    message.content.substring(0, 50)
+                    message.content.substring(0, 70)
                 );
+            }
+
+            const rect = element.getBoundingClientRect();
+
+            visible.push({
+                message,
+                element,
+                top: rect.top
+            });
+        }
+
+        /*
+         * Sort by actual vertical position.
+         */
+        visible.sort((a, b) => a.top - b.top);
+
+        /*
+         * Record ordering relationships.
+         */
+        for (let i = 0; i < visible.length; i++) {
+            const currentId = visible[i].message.id;
+
+            if (!before.has(currentId)) {
+                before.set(currentId, new Set());
+            }
+
+            for (let j = i + 1; j < visible.length; j++) {
+                const followingId =
+                    visible[j].message.id;
+
+                before
+                    .get(currentId)!
+                    .add(followingId);
             }
         }
 
-        const currentScrollTop = scrollContainer.scrollTop;
+        return visible;
+    }
+
+    /*
+     * Initial collection.
+     */
+    collectVisibleMessages();
+
+    let topStableIterations = 0;
+    let previousScrollTop = -1;
+
+    for (let iteration = 0; iteration < 100; iteration++) {
+        const currentScrollTop =
+            scrollContainer.scrollTop;
+
+        const visible = collectVisibleMessages();
 
         console.log(
-            `GPTExport: iteration ${iteration}, scrollTop=${currentScrollTop}, collected=${collected.size}`
+            `GPTExport: iteration ${iteration}, ` +
+            `scrollTop=${currentScrollTop}, ` +
+            `visible=${visible.length}, ` +
+            `collected=${collected.size}`
         );
 
-        // We are at the top.
+        /*
+         * Reached the top.
+         */
         if (currentScrollTop <= 5) {
             topStableIterations++;
 
-            // Give ChatGPT time to render older messages.
             await wait(1000);
 
-            const afterWaitMessages = getVisibleMessages();
+            collectVisibleMessages();
 
-            for (const message of afterWaitMessages) {
-                if (!collected.has(message.id)) {
-                    collected.set(message.id, message);
-
-                    console.log(
-                        "GPTExport: collected after reaching top",
-                        message.role,
-                        message.content.substring(0, 50)
-                    );
-                }
-            }
-
-            // If we're still at the top after waiting,
-            // we've most likely reached the beginning.
             if (
                 scrollContainer.scrollTop <= 5 &&
                 topStableIterations >= 2
@@ -174,73 +291,178 @@ async function loadEntireConversation(): Promise<Message[]> {
             topStableIterations = 0;
         }
 
-        previousScrollTop = currentScrollTop;
-
-        // Scroll significantly upward.
-        scrollContainer.scrollTop = Math.max(
+        /*
+         * Scroll upward.
+         */
+        const nextScrollTop = Math.max(
             0,
-            currentScrollTop - scrollContainer.clientHeight * 0.8
+            currentScrollTop -
+                scrollContainer.clientHeight * 0.8
         );
+
+        scrollContainer.scrollTop = nextScrollTop;
 
         await wait(1000);
 
-        // If scrolling didn't move at all, try again after
-        // giving the page more time to render.
-        if (scrollContainer.scrollTop === previousScrollTop) {
+        /*
+         * If scrolling stopped, give the page extra time.
+         */
+        if (
+            scrollContainer.scrollTop ===
+            previousScrollTop
+        ) {
             await wait(1500);
         }
+
+        previousScrollTop =
+            scrollContainer.scrollTop;
     }
 
-    // Convert to array.
-    const messages = Array.from(collected.values());
-    
+    /*
+     * Final collection.
+     */
+    await wait(1000);
+    collectVisibleMessages();
+
+    const messages = Array.from(
+        collected.values()
+    );
+
     console.log(
         `GPTExport: collected ${messages.length} unique messages`
     );
-    
-    // Sort messages by their position in the conversation.
-    // ChatGPT's DOM order represents the actual conversation order
-    // whenever the messages are currently rendered together.
-    messages.sort((a, b) => {
-        const elements = document.querySelectorAll(
-            '[data-message-author-role], .user-message-bubble-color'
-        );
-    
-        const indexOf = (message: Message): number => {
-            for (let i = 0; i < elements.length; i++) {
-                const element = elements[i];
-    
-                const assistantId =
-                    element.getAttribute("data-message-id");
-    
-                if (
-                    assistantId === message.id ||
-                    (
-                        message.role === "user" &&
-                        element.textContent?.trim() === message.content
-                    )
-                ) {
-                    return i;
-                }
-            }
-    
-            return -1;
-        };
-    
-        return indexOf(a) - indexOf(b);
-    });
-    
-    console.log("GPTExport: sorted conversation");
-    console.log(messages);
-    
-    return messages;
 
+    /*
+     * ---------------------------------------------------------
+     * TOPOLOGICAL SORT
+     * ---------------------------------------------------------
+     *
+     * Pairwise DOM relationships are converted into a
+     * global conversation order.
+     */
+
+    const incoming = new Map<string, number>();
+
+    for (const message of messages) {
+        incoming.set(message.id, 0);
+    }
+
+    for (const followingMessages of before.values()) {
+        for (const followingId of followingMessages) {
+            incoming.set(
+                followingId,
+                (incoming.get(followingId) ?? 0) + 1
+            );
+        }
+    }
+
+    const queue: string[] = [];
+
+    for (const message of messages) {
+        if ((incoming.get(message.id) ?? 0) === 0) {
+            queue.push(message.id);
+        }
+    }
+
+    const orderedIds: string[] = [];
+
+    while (queue.length > 0) {
+        const id = queue.shift()!;
+
+        orderedIds.push(id);
+
+        const followingMessages =
+            before.get(id);
+
+        if (!followingMessages) {
+            continue;
+        }
+
+        for (const followingId of followingMessages) {
+            const count =
+                (incoming.get(followingId) ?? 0) - 1;
+
+            incoming.set(followingId, count);
+
+            if (count === 0) {
+                queue.push(followingId);
+            }
+        }
+    }
+
+    /*
+     * Build final array.
+     */
+    const messageById = new Map(
+        messages.map(message => [
+            message.id,
+            message
+        ])
+    );
+
+    const orderedMessages: Message[] = [];
+
+    for (const id of orderedIds) {
+        const message = messageById.get(id);
+
+        if (message) {
+            orderedMessages.push(message);
+        }
+    }
+
+    /*
+     * Safety fallback.
+     *
+     * If something could not be ordered, append it instead
+     * of silently losing it.
+     */
+    if (orderedMessages.length !== messages.length) {
+        for (const message of messages) {
+            if (
+                !orderedMessages.some(
+                    x => x.id === message.id
+                )
+            ) {
+                orderedMessages.push(message);
+            }
+        }
+    }
+
+    /*
+     * Normalize order.
+     */
+    orderedMessages.forEach(
+        (message, index) => {
+            message.order = index;
+        }
+    );
+
+    console.log(
+        "GPTExport: final conversation order"
+    );
+
+    orderedMessages.forEach(
+        (message, index) => {
+            console.log(
+                `${index + 1} ${message.role}:`,
+                message.content.substring(0, 70)
+            );
+        }
+    );
+
+    console.log(orderedMessages);
+
+    return orderedMessages;
+}
 console.log("GPTExport: ready");
 
-(window as any).postMessage({
-    source: "GPTExport",
-    type: "READY"
-}, "*");
+window.postMessage(
+    {
+        source: "GPTExport",
+        type: "READY"
+    },
+    "*"
+);
 
 window.addEventListener("message", async (event) => {
     if (
@@ -255,10 +477,13 @@ window.addEventListener("message", async (event) => {
 
         console.log("GPTExport: RESULT", result);
 
-        window.postMessage({
-            source: "GPTExport",
-            type: "CONVERSATION_RESULT",
-            data: result
-        }, "*");
+        window.postMessage(
+            {
+                source: "GPTExport",
+                type: "CONVERSATION_RESULT",
+                data: result
+            },
+            "*"
+        );
     }
 });

@@ -10,20 +10,28 @@ let lastMessageCount = 0;
 function getVisibleMessages(): Message[] {
     const result: Message[] = [];
 
-    // Assistant messages
+    /*
+     * ---------------------------------------------------------
+     * ASSISTANT MESSAGES
+     * ---------------------------------------------------------
+     */
     const assistantMessages = document.querySelectorAll(
         '[data-message-author-role="assistant"]'
     );
 
     for (const element of assistantMessages) {
-        const id = element.getAttribute("data-message-id");
+        const id =
+            element.getAttribute("data-message-id");
 
         if (!id) {
             continue;
         }
 
-        const markdown = element.querySelector(".markdown");
-        const content = markdown?.textContent?.trim();
+        const markdown =
+            element.querySelector(".markdown");
+
+        const content =
+            markdown?.textContent?.trim();
 
         if (!content) {
             continue;
@@ -37,13 +45,22 @@ function getVisibleMessages(): Message[] {
         });
     }
 
-    // User messages
-    const userMessages = document.querySelectorAll(
-        ".user-message-bubble-color"
-    );
+    /*
+     * ---------------------------------------------------------
+     * USER MESSAGES
+     * ---------------------------------------------------------
+     */
+    const userMessages =
+        document.querySelectorAll(".text-message");
 
     for (const element of userMessages) {
-        const content = element.textContent?.trim();
+        const content =
+            element
+                .querySelector(
+                    ".user-message-bubble-color"
+                )
+                ?.textContent
+                ?.trim();
 
         if (!content) {
             continue;
@@ -61,10 +78,15 @@ function getVisibleMessages(): Message[] {
 }
 
 function logVisibleMessages() {
-    const messages = getVisibleMessages();
+    const messages =
+        getVisibleMessages();
 
-    if (messages.length !== lastMessageCount) {
-        lastMessageCount = messages.length;
+    if (
+        messages.length !==
+        lastMessageCount
+    ) {
+        lastMessageCount =
+            messages.length;
 
         console.log(
             `GPTExport: ${messages.length} messages currently visible`
@@ -74,102 +96,192 @@ function logVisibleMessages() {
     }
 }
 
-console.log("GPTExport loaded");
+console.log(
+    "GPTExport loaded"
+);
 
-const observer = new MutationObserver(() => {
-    logVisibleMessages();
-});
+/*
+ * ---------------------------------------------------------
+ * MUTATION OBSERVER
+ * ---------------------------------------------------------
+ */
+const observer =
+    new MutationObserver(() => {
+        logVisibleMessages();
+    });
 
-observer.observe(document.body, {
-    childList: true,
-    subtree: true
-});
+observer.observe(
+    document.body,
+    {
+        childList: true,
+        subtree: true
+    }
+);
 
 logVisibleMessages();
 
-async function wait(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+/*
+ * ---------------------------------------------------------
+ * WAIT
+ * ---------------------------------------------------------
+ */
+async function wait(
+    ms: number
+): Promise<void> {
+    return new Promise(
+        resolve =>
+            setTimeout(resolve, ms)
+    );
 }
 
+/*
+ * ---------------------------------------------------------
+ * LOAD ENTIRE CONVERSATION
+ * ---------------------------------------------------------
+ */
 async function loadEntireConversation(): Promise<Message[]> {
-    const collected = new Map<string, Message>();
+    const collected =
+        new Map<string, Message>();
 
-    const scrollContainer = document.querySelector<HTMLElement>(
-        "[data-scroll-root]"
-    );
+    /*
+     * Find ChatGPT's scroll container.
+     */
+    const scrollContainer =
+        document.querySelector<HTMLElement>(
+            "[data-scroll-root]"
+        );
 
     if (!scrollContainer) {
-        console.error("GPTExport: scroll container not found");
+        console.error(
+            "GPTExport: scroll container not found"
+        );
+
         return [];
     }
 
-    console.log("GPTExport: scroll container found");
-
-    let userCounter = 0;
+    console.log(
+        "GPTExport: scroll container found"
+    );
 
     /*
-     * Keep a private identity for every user DOM element
-     * we encounter.
+     * ---------------------------------------------------------
+     * MESSAGE ELEMENTS
+     * ---------------------------------------------------------
      */
-    const userIds = new WeakMap<Element, string>();
-
     function getMessageElements(): Element[] {
         return Array.from(
             document.querySelectorAll(
-                '[data-message-author-role="assistant"], .user-message-bubble-color'
+                '[data-message-author-role="assistant"], .text-message'
             )
         );
     }
 
-    function getMessageId(element: Element): string | null {
+    /*
+     * ---------------------------------------------------------
+     * STABLE STRING HASH
+     * ---------------------------------------------------------
+     *
+     * Small, fast, deterministic hash (djb2 variant).
+     * Used to derive a stable id for user messages from
+     * their text content, since ChatGPT virtualizes the
+     * DOM and re-creates elements as you scroll - a
+     * WeakMap keyed by element identity breaks in that
+     * case (same message, new element, new "id", causing
+     * messages to appear duplicated or dropped).
+     */
+    function hashString(value: string): string {
+        let hash = 5381;
+
+        for (let i = 0; i < value.length; i++) {
+            hash =
+                ((hash << 5) + hash + value.charCodeAt(i)) |
+                0;
+        }
+
+        return (hash >>> 0).toString(36);
+    }
+
+    /*
+     * ---------------------------------------------------------
+     * MESSAGE ID
+     * ---------------------------------------------------------
+     */
+    function getMessageId(
+        element: Element,
+        content: string
+    ): string {
+        /*
+         * Assistant messages have
+         * a real message ID.
+         */
         const assistantId =
-            element.getAttribute("data-message-id");
+            element.getAttribute(
+                "data-message-id"
+            );
 
         if (assistantId) {
             return assistantId;
         }
 
         /*
-         * User messages don't expose data-message-id.
-         *
-         * Assign an internal ID to this DOM element.
+         * User messages don't expose a stable
+         * data-message-id, and their DOM element
+         * gets recreated when ChatGPT virtualizes
+         * the scroll list. Derive the id from the
+         * message content instead, so the same
+         * message always maps to the same id no
+         * matter how many times its element is
+         * re-created.
          */
-        if (!userIds.has(element)) {
-            userIds.set(element, `user-${userCounter++}`);
-        }
-
-        return userIds.get(element)!;
+        return `user-${hashString(content)}`;
     }
 
-    function getMessage(element: Element): Message | null {
-        const isAssistant = element.matches(
-            '[data-message-author-role="assistant"]'
-        );
+    /*
+     * ---------------------------------------------------------
+     * MESSAGE EXTRACTION
+     * ---------------------------------------------------------
+     */
+    function getMessage(
+        element: Element
+    ): Message | null {
+        const isAssistant =
+            element.matches(
+                '[data-message-author-role="assistant"]'
+            );
 
-        const role: Message["role"] = isAssistant
-            ? "assistant"
-            : "user";
+        const role: Message["role"] =
+            isAssistant
+                ? "assistant"
+                : "user";
 
-        const id = getMessageId(element);
-
-        if (!id) {
-            return null;
-        }
-
-        let content: string | undefined;
+        let content:
+            | string
+            | undefined;
 
         if (isAssistant) {
-            content = element
-                .querySelector(".markdown")
-                ?.textContent
-                ?.trim();
+            content =
+                element
+                    .querySelector(
+                        ".markdown"
+                    )
+                    ?.textContent
+                    ?.trim();
         } else {
-            content = element.textContent?.trim();
+            content =
+                element
+                    .querySelector(
+                        ".user-message-bubble-color"
+                    )
+                    ?.textContent
+                    ?.trim();
         }
 
         if (!content) {
             return null;
         }
+
+        const id =
+            getMessageId(element, content);
 
         return {
             id,
@@ -180,14 +292,23 @@ async function loadEntireConversation(): Promise<Message[]> {
     }
 
     /*
-     * Store pairwise ordering information.
+     * ---------------------------------------------------------
+     * ORDERING
+     * ---------------------------------------------------------
      *
-     * A -> B means A appears before B in the DOM.
+     * A -> B means:
+     *
+     * A appears before B.
+     *
+     * This is necessary because ChatGPT
+     * virtualizes the conversation DOM.
      */
-    const before = new Map<string, Set<string>>();
+    const before =
+        new Map<string, Set<string>>();
 
     function collectVisibleMessages() {
-        const elements = getMessageElements();
+        const elements =
+            getMessageElements();
 
         const visible: {
             message: Message;
@@ -196,23 +317,35 @@ async function loadEntireConversation(): Promise<Message[]> {
         }[] = [];
 
         for (const element of elements) {
-            const message = getMessage(element);
+            const message =
+                getMessage(element);
 
             if (!message) {
                 continue;
             }
 
-            if (!collected.has(message.id)) {
-                collected.set(message.id, message);
+            if (
+                !collected.has(
+                    message.id
+                )
+            ) {
+                collected.set(
+                    message.id,
+                    message
+                );
 
                 console.log(
                     "GPTExport: collected",
                     message.role,
-                    message.content.substring(0, 70)
+                    message.content.substring(
+                        0,
+                        70
+                    )
                 );
             }
 
-            const rect = element.getBoundingClientRect();
+            const rect =
+                element.getBoundingClientRect();
 
             visible.push({
                 message,
@@ -222,23 +355,47 @@ async function loadEntireConversation(): Promise<Message[]> {
         }
 
         /*
-         * Sort by actual vertical position.
+         * Sort according to actual
+         * vertical position.
          */
-        visible.sort((a, b) => a.top - b.top);
+        visible.sort(
+            (a, b) =>
+                a.top - b.top
+        );
 
         /*
-         * Record ordering relationships.
+         * Record relationships.
          */
-        for (let i = 0; i < visible.length; i++) {
-            const currentId = visible[i].message.id;
+        for (
+            let i = 0;
+            i < visible.length;
+            i++
+        ) {
+            const currentId =
+                visible[i]
+                    .message
+                    .id;
 
-            if (!before.has(currentId)) {
-                before.set(currentId, new Set());
+            if (
+                !before.has(
+                    currentId
+                )
+            ) {
+                before.set(
+                    currentId,
+                    new Set()
+                );
             }
 
-            for (let j = i + 1; j < visible.length; j++) {
+            for (
+                let j = i + 1;
+                j < visible.length;
+                j++
+            ) {
                 const followingId =
-                    visible[j].message.id;
+                    visible[j]
+                        .message
+                        .id;
 
                 before
                     .get(currentId)!
@@ -250,18 +407,37 @@ async function loadEntireConversation(): Promise<Message[]> {
     }
 
     /*
-     * Initial collection.
+     * ---------------------------------------------------------
+     * INITIAL COLLECTION
+     * ---------------------------------------------------------
      */
     collectVisibleMessages();
 
     let topStableIterations = 0;
     let previousScrollTop = -1;
 
-    for (let iteration = 0; iteration < 100; iteration++) {
+    /*
+     * ---------------------------------------------------------
+     * SCROLL THROUGH CONVERSATION
+     * ---------------------------------------------------------
+     */
+    const SCROLL_WAIT_MS = 500;
+    const STUCK_EXTRA_WAIT_MS = 800;
+    const TOP_WAIT_MS = 600;
+
+    for (
+        let iteration = 0;
+        iteration < 150;
+        iteration++
+    ) {
         const currentScrollTop =
             scrollContainer.scrollTop;
 
-        const visible = collectVisibleMessages();
+        const collectedBefore =
+            collected.size;
+
+        const visible =
+            collectVisibleMessages();
 
         console.log(
             `GPTExport: iteration ${iteration}, ` +
@@ -271,20 +447,34 @@ async function loadEntireConversation(): Promise<Message[]> {
         );
 
         /*
-         * Reached the top.
+         * -----------------------------------------------------
+         * TOP DETECTION
+         * -----------------------------------------------------
          */
-        if (currentScrollTop <= 5) {
+        if (
+            currentScrollTop <= 5
+        ) {
             topStableIterations++;
 
-            await wait(1000);
+            /*
+             * Give ChatGPT a short window to
+             * render any remaining older messages.
+             */
+            await wait(TOP_WAIT_MS);
 
             collectVisibleMessages();
 
+            /*
+             * Require two stable checks.
+             */
             if (
                 scrollContainer.scrollTop <= 5 &&
                 topStableIterations >= 2
             ) {
-                console.log("GPTExport: reached top");
+                console.log(
+                    "GPTExport: reached top"
+                );
+
                 break;
             }
         } else {
@@ -292,26 +482,51 @@ async function loadEntireConversation(): Promise<Message[]> {
         }
 
         /*
-         * Scroll upward.
+         * -----------------------------------------------------
+         * SCROLL UP
+         * -----------------------------------------------------
+         *
+         * Step is intentionally SMALLER than one
+         * full viewport (0.6x) so consecutive steps
+         * overlap. ChatGPT virtualizes the message
+         * list, and if a step jumps too far, some
+         * messages never get a chance to mount into
+         * the DOM at all and are silently skipped -
+         * no amount of waiting recovers them once
+         * that happens. Speed instead comes from the
+         * short waits below plus skipping the extra
+         * wait when messages are still being found.
          */
-        const nextScrollTop = Math.max(
-            0,
-            currentScrollTop -
-                scrollContainer.clientHeight * 0.8
-        );
+        const nextScrollTop =
+            Math.max(
+                0,
+                currentScrollTop -
+                    scrollContainer.clientHeight *
+                        0.6
+            );
 
-        scrollContainer.scrollTop = nextScrollTop;
+        scrollContainer.scrollTop =
+            nextScrollTop;
 
-        await wait(1000);
+        await wait(SCROLL_WAIT_MS);
 
         /*
-         * If scrolling stopped, give the page extra time.
+         * If scrolling didn't move AND no new
+         * messages were collected this round,
+         * ChatGPT is likely still loading -
+         * give it a bit more time. If new
+         * messages DID show up, skip the extra
+         * wait and move on immediately.
          */
+        const madeProgress =
+            collected.size > collectedBefore;
+
         if (
             scrollContainer.scrollTop ===
-            previousScrollTop
+                previousScrollTop &&
+            !madeProgress
         ) {
-            await wait(1500);
+            await wait(STUCK_EXTRA_WAIT_MS);
         }
 
         previousScrollTop =
@@ -319,14 +534,18 @@ async function loadEntireConversation(): Promise<Message[]> {
     }
 
     /*
-     * Final collection.
+     * ---------------------------------------------------------
+     * FINAL COLLECTION
+     * ---------------------------------------------------------
      */
     await wait(1000);
+
     collectVisibleMessages();
 
-    const messages = Array.from(
-        collected.values()
-    );
+    const messages =
+        Array.from(
+            collected.values()
+        );
 
     console.log(
         `GPTExport: collected ${messages.length} unique messages`
@@ -336,38 +555,69 @@ async function loadEntireConversation(): Promise<Message[]> {
      * ---------------------------------------------------------
      * TOPOLOGICAL SORT
      * ---------------------------------------------------------
-     *
-     * Pairwise DOM relationships are converted into a
-     * global conversation order.
      */
-
-    const incoming = new Map<string, number>();
+    const incoming =
+        new Map<string, number>();
 
     for (const message of messages) {
-        incoming.set(message.id, 0);
+        incoming.set(
+            message.id,
+            0
+        );
     }
 
-    for (const followingMessages of before.values()) {
-        for (const followingId of followingMessages) {
+    /*
+     * Count incoming relationships.
+     */
+    for (
+        const followingMessages
+        of before.values()
+    ) {
+        for (
+            const followingId
+            of followingMessages
+        ) {
             incoming.set(
                 followingId,
-                (incoming.get(followingId) ?? 0) + 1
+                (
+                    incoming.get(
+                        followingId
+                    ) ?? 0
+                ) + 1
             );
         }
     }
 
+    /*
+     * Messages with no incoming
+     * relationships come first.
+     */
     const queue: string[] = [];
 
     for (const message of messages) {
-        if ((incoming.get(message.id) ?? 0) === 0) {
-            queue.push(message.id);
+        if (
+            (
+                incoming.get(
+                    message.id
+                ) ?? 0
+            ) === 0
+        ) {
+            queue.push(
+                message.id
+            );
         }
     }
 
     const orderedIds: string[] = [];
 
-    while (queue.length > 0) {
-        const id = queue.shift()!;
+    /*
+     * Topological sort.
+     */
+    while (
+        queue.length > 0
+    ) {
+        const id =
+            queue.shift()!;
 
         orderedIds.push(id);
 
@@ -378,65 +628,106 @@ async function loadEntireConversation(): Promise<Message[]> {
             continue;
         }
 
-        for (const followingId of followingMessages) {
+        for (
+            const followingId
+            of followingMessages
+        ) {
             const count =
-                (incoming.get(followingId) ?? 0) - 1;
+                (
+                    incoming.get(
+                        followingId
+                    ) ?? 0
+                ) - 1;
 
-            incoming.set(followingId, count);
+            incoming.set(
+                followingId,
+                count
+            );
 
             if (count === 0) {
-                queue.push(followingId);
+                queue.push(
+                    followingId
+                );
             }
         }
     }
 
     /*
-     * Build final array.
+     * ---------------------------------------------------------
+     * BUILD FINAL ARRAY
+     * ---------------------------------------------------------
      */
-    const messageById = new Map(
-        messages.map(message => [
-            message.id,
-            message
-        ])
-    );
+    const messageById =
+        new Map(
+            messages.map(
+                message => [
+                    message.id,
+                    message
+                ]
+            )
+        );
 
-    const orderedMessages: Message[] = [];
+    const orderedMessages:
+        Message[] = [];
 
-    for (const id of orderedIds) {
-        const message = messageById.get(id);
+    for (
+        const id
+        of orderedIds
+    ) {
+        const message =
+            messageById.get(id);
 
         if (message) {
-            orderedMessages.push(message);
+            orderedMessages.push(
+                message
+            );
         }
     }
 
     /*
-     * Safety fallback.
-     *
-     * If something could not be ordered, append it instead
-     * of silently losing it.
+     * ---------------------------------------------------------
+     * SAFETY FALLBACK
+     * ---------------------------------------------------------
      */
-    if (orderedMessages.length !== messages.length) {
-        for (const message of messages) {
+    if (
+        orderedMessages.length !==
+        messages.length
+    ) {
+        for (
+            const message
+            of messages
+        ) {
             if (
                 !orderedMessages.some(
-                    x => x.id === message.id
+                    x =>
+                        x.id ===
+                        message.id
                 )
             ) {
-                orderedMessages.push(message);
+                orderedMessages.push(
+                    message
+                );
             }
         }
     }
 
     /*
-     * Normalize order.
+     * ---------------------------------------------------------
+     * NORMALIZE ORDER
+     * ---------------------------------------------------------
      */
     orderedMessages.forEach(
         (message, index) => {
-            message.order = index;
+            message.order =
+                index;
         }
     );
 
+    /*
+     * ---------------------------------------------------------
+     * LOG FINAL RESULT
+     * ---------------------------------------------------------
+     */
     console.log(
         "GPTExport: final conversation order"
     );
@@ -445,16 +736,29 @@ async function loadEntireConversation(): Promise<Message[]> {
         (message, index) => {
             console.log(
                 `${index + 1} ${message.role}:`,
-                message.content.substring(0, 70)
+                message.content.substring(
+                    0,
+                    70
+                )
             );
         }
     );
 
-    console.log(orderedMessages);
+    console.log(
+        orderedMessages
+    );
 
     return orderedMessages;
 }
-console.log("GPTExport: ready");
+
+/*
+ * ---------------------------------------------------------
+ * READY
+ * ---------------------------------------------------------
+ */
+console.log(
+    "GPTExport: ready"
+);
 
 window.postMessage(
     {
@@ -464,26 +768,45 @@ window.postMessage(
     "*"
 );
 
-window.addEventListener("message", async (event) => {
-    if (
-        event.source !== window ||
-        event.data?.source !== "GPTExport_CONSOLE"
-    ) {
-        return;
-    }
-
-    if (event.data.type === "LOAD_CONVERSATION") {
-        const result = await loadEntireConversation();
-
-        console.log("GPTExport: RESULT", result);
-
-        window.postMessage(
-            {
-                source: "GPTExport",
-                type: "CONVERSATION_RESULT",
-                data: result
-            },
-            "*"
-        );
-    }
-});
+/*
+ * ---------------------------------------------------------
+ * CHROME MESSAGE HANDLER
+ * ---------------------------------------------------------
+ */
+ chrome.runtime.onMessage.addListener(
+     async (message, _sender, sendResponse) => {
+         if (message.type !== "LOAD_CONVERSATION") {
+             return;
+         }
+ 
+         try {
+             console.log(
+                 "GPTExport: LOAD_CONVERSATION received"
+             );
+ 
+             const result =
+                 await loadEntireConversation();
+ 
+             console.log(
+                 "GPTExport: sending conversation",
+                 result
+             );
+ 
+             sendResponse({
+                 success: true,
+                 data: result
+             });
+ 
+         } catch (error) {
+             console.error(
+                 "GPTExport: failed to load conversation",
+                 error
+             );
+ 
+             sendResponse({
+                 success: false,
+                 error: String(error)
+             });
+         }
+     }
+ );

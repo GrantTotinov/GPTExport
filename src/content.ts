@@ -122,16 +122,57 @@ logVisibleMessages();
 
 /*
  * ---------------------------------------------------------
- * WAIT
+ * WAIT FOR DOM SETTLE
  * ---------------------------------------------------------
+ *
+ * Instead of always waiting a fixed number of ms after
+ * scrolling, watch the container for actual DOM mutations
+ * and resolve as soon as things go quiet (debounced by
+ * quietMs). This is both faster (short chats/fast renders
+ * don't wait longer than needed) and safer (slow renders
+ * on long chats naturally get more time instead of being
+ * cut off by a fixed timeout).
+ *
+ * maxMs is a hard safety cap so a container that never
+ * "settles" can't hang the export forever.
  */
-async function wait(
-    ms: number
+async function waitForDomSettle(
+    target: HTMLElement,
+    quietMs: number,
+    maxMs: number
 ): Promise<void> {
-    return new Promise(
-        resolve =>
-            setTimeout(resolve, ms)
-    );
+    return new Promise(resolve => {
+        let settleTimer: ReturnType<typeof setTimeout>;
+
+        const finish = () => {
+            clearTimeout(settleTimer);
+            clearTimeout(hardTimer);
+            observer.disconnect();
+            resolve();
+        };
+
+        const observer = new MutationObserver(() => {
+            clearTimeout(settleTimer);
+            settleTimer = setTimeout(finish, quietMs);
+        });
+
+        observer.observe(target, {
+            childList: true,
+            subtree: true
+        });
+
+        /*
+         * Start the quiet timer immediately too, in
+         * case no mutation happens at all (e.g. we're
+         * already at the top and nothing new loads).
+         */
+        settleTimer = setTimeout(finish, quietMs);
+
+        const hardTimer = setTimeout(
+            finish,
+            maxMs
+        );
+    });
 }
 
 /*
@@ -414,27 +455,32 @@ async function loadEntireConversation(): Promise<Message[]> {
     collectVisibleMessages();
 
     let topStableIterations = 0;
-    let previousScrollTop = -1;
 
     /*
      * ---------------------------------------------------------
      * SCROLL THROUGH CONVERSATION
      * ---------------------------------------------------------
+     *
+     * Rather than guessing a fixed delay after each
+     * scroll step, we watch the scroll container with
+     * a MutationObserver and resolve as soon as it
+     * stops changing (settleMs of silence). This adapts
+     * automatically: fast renders don't wait longer than
+     * needed, slow renders on huge chats naturally get
+     * more time instead of being cut off.
      */
-    const SCROLL_WAIT_MS = 500;
-    const STUCK_EXTRA_WAIT_MS = 800;
-    const TOP_WAIT_MS = 600;
+    const SETTLE_QUIET_MS = 150;
+    const SETTLE_MAX_MS = 2500;
+    const TOP_SETTLE_QUIET_MS = 300;
+    const TOP_SETTLE_MAX_MS = 1500;
 
     for (
         let iteration = 0;
-        iteration < 150;
+        iteration < 200;
         iteration++
     ) {
         const currentScrollTop =
             scrollContainer.scrollTop;
-
-        const collectedBefore =
-            collected.size;
 
         const visible =
             collectVisibleMessages();
@@ -457,10 +503,16 @@ async function loadEntireConversation(): Promise<Message[]> {
             topStableIterations++;
 
             /*
-             * Give ChatGPT a short window to
-             * render any remaining older messages.
+             * Give ChatGPT a window to render any
+             * remaining older messages, but only as
+             * long as the DOM is actually still
+             * changing.
              */
-            await wait(TOP_WAIT_MS);
+            await waitForDomSettle(
+                scrollContainer,
+                TOP_SETTLE_QUIET_MS,
+                TOP_SETTLE_MAX_MS
+            );
 
             collectVisibleMessages();
 
@@ -486,16 +538,13 @@ async function loadEntireConversation(): Promise<Message[]> {
          * SCROLL UP
          * -----------------------------------------------------
          *
-         * Step is intentionally SMALLER than one
-         * full viewport (0.6x) so consecutive steps
-         * overlap. ChatGPT virtualizes the message
-         * list, and if a step jumps too far, some
-         * messages never get a chance to mount into
-         * the DOM at all and are silently skipped -
-         * no amount of waiting recovers them once
-         * that happens. Speed instead comes from the
-         * short waits below plus skipping the extra
-         * wait when messages are still being found.
+         * Step is intentionally SMALLER than one full
+         * viewport (0.6x) so consecutive steps overlap.
+         * ChatGPT virtualizes the message list, and if a
+         * step jumps too far, some messages never get a
+         * chance to mount into the DOM at all and are
+         * silently skipped - no amount of waiting
+         * recovers them once that happens.
          */
         const nextScrollTop =
             Math.max(
@@ -508,29 +557,19 @@ async function loadEntireConversation(): Promise<Message[]> {
         scrollContainer.scrollTop =
             nextScrollTop;
 
-        await wait(SCROLL_WAIT_MS);
-
         /*
-         * If scrolling didn't move AND no new
-         * messages were collected this round,
-         * ChatGPT is likely still loading -
-         * give it a bit more time. If new
-         * messages DID show up, skip the extra
-         * wait and move on immediately.
+         * Wait only as long as the DOM is actually
+         * mutating - this is the main speed win over
+         * a fixed delay. Short chats/fast renders
+         * settle almost instantly; slow renders on
+         * long chats get up to SETTLE_MAX_MS.
          */
-        const madeProgress =
-            collected.size > collectedBefore;
+        await waitForDomSettle(
+            scrollContainer,
+            SETTLE_QUIET_MS,
+            SETTLE_MAX_MS
+        );
 
-        if (
-            scrollContainer.scrollTop ===
-                previousScrollTop &&
-            !madeProgress
-        ) {
-            await wait(STUCK_EXTRA_WAIT_MS);
-        }
-
-        previousScrollTop =
-            scrollContainer.scrollTop;
     }
 
     /*
@@ -538,7 +577,11 @@ async function loadEntireConversation(): Promise<Message[]> {
      * FINAL COLLECTION
      * ---------------------------------------------------------
      */
-    await wait(1000);
+    await waitForDomSettle(
+        scrollContainer,
+        TOP_SETTLE_QUIET_MS,
+        TOP_SETTLE_MAX_MS
+    );
 
     collectVisibleMessages();
 

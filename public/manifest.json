@@ -4,6 +4,10 @@
     "version": "0.1.0",
     "description": "Export ChatGPT conversations as Markdown.",
 
+    "icons": {
+        "16": "icons/icon16.png"
+    },
+
     "permissions": [
         "activeTab",
         "clipboardWrite",
@@ -27,6 +31,9 @@
 
     "action": {
         "default_title": "GPTExport",
-        "default_popup": "popup.html"
+        "default_popup": "popup.html",
+        "default_icon": {
+            "16": "icons/icon16.png"
+        }
     }
 }

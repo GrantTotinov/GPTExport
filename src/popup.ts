@@ -20,6 +20,32 @@ function showError(text: string, ms: number): void {
     }, ms);
 }
 
+/*
+ * ---------------------------------------------------------
+ * LIVE PROGRESS
+ * ---------------------------------------------------------
+ *
+ * The content script sends EXPORT_PROGRESS messages while
+ * it scrolls through the conversation. Reflect that on the
+ * button so long conversations don't look frozen.
+ */
+chrome.runtime.onMessage.addListener(message => {
+    if (message?.type !== "EXPORT_PROGRESS") {
+        return;
+    }
+
+    if (!button.disabled) {
+        /*
+         * Ignore stray progress messages that arrive
+         * outside of an active export.
+         */
+        return;
+    }
+
+    button.textContent =
+        `Loading... (${message.collected})`;
+});
+
 button.addEventListener("click", async () => {
     console.log("GPTExport: export clicked");
 

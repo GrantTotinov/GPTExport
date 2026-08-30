@@ -5,6 +5,220 @@ interface Message {
     order: number;
 }
 
+/*
+ * ---------------------------------------------------------
+ * HTML TO MARKDOWN
+ * ---------------------------------------------------------
+ *
+ * ChatGPT renders assistant replies as real HTML (code
+ * blocks, lists, bold/italic, links, headings...). Using
+ * plain textContent throws all of that away. This walks
+ * the DOM tree and reconstructs Markdown syntax instead.
+ *
+ * Deliberately conservative: unknown/unhandled elements
+ * just recurse into their children, so nothing gets
+ * silently dropped even if ChatGPT's markup changes.
+ */
+function htmlToMarkdown(root: Element): string {
+    function renderInline(node: Node): string {
+        return Array.from(node.childNodes)
+            .map(renderNode)
+            .join("");
+    }
+
+    function renderNode(node: Node): string {
+        if (node.nodeType === Node.TEXT_NODE) {
+            return node.textContent ?? "";
+        }
+
+        if (node.nodeType !== Node.ELEMENT_NODE) {
+            return "";
+        }
+
+        const element = node as Element;
+        const tag = element.tagName.toLowerCase();
+
+        switch (tag) {
+            case "strong":
+            case "b":
+                return `**${renderInline(element)}**`;
+
+            case "em":
+            case "i":
+                return `*${renderInline(element)}*`;
+
+            case "code": {
+                /*
+                 * Inline code, unless it's already
+                 * inside a <pre> (handled separately).
+                 */
+                if (element.closest("pre")) {
+                    return element.textContent ?? "";
+                }
+
+                return `\`${element.textContent ?? ""}\``;
+            }
+
+            case "pre": {
+                const codeElement =
+                    element.querySelector("code");
+
+                const language =
+                    codeElement
+                        ?.className
+                        ?.match(/language-(\S+)/)
+                        ?.[1] ?? "";
+
+                const code =
+                    (codeElement ?? element)
+                        .textContent ?? "";
+
+                return (
+                    `\n\`\`\`${language}\n` +
+                    `${code.replace(/\n$/, "")}\n` +
+                    "```\n"
+                );
+            }
+
+            case "a": {
+                const href =
+                    element.getAttribute("href") ?? "";
+
+                const text = renderInline(element);
+
+                return href
+                    ? `[${text}](${href})`
+                    : text;
+            }
+
+            case "h1":
+            case "h2":
+            case "h3":
+            case "h4":
+            case "h5":
+            case "h6": {
+                const level =
+                    Number(tag.charAt(1));
+
+                return (
+                    `\n${"#".repeat(level)} ` +
+                    `${renderInline(element)}\n`
+                );
+            }
+
+            case "blockquote": {
+                const text =
+                    renderInline(element).trim();
+
+                const quoted = text
+                    .split("\n")
+                    .map(line => `> ${line}`)
+                    .join("\n");
+
+                return `\n${quoted}\n`;
+            }
+
+            case "ul":
+            case "ol": {
+                const items =
+                    Array.from(
+                        element.children
+                    ).filter(
+                        child =>
+                            child.tagName.toLowerCase() ===
+                            "li"
+                    );
+
+                const rendered = items
+                    .map((item, index) => {
+                        const bullet =
+                            tag === "ol"
+                                ? `${index + 1}.`
+                                : "-";
+
+                        const text =
+                            renderInline(item).trim();
+
+                        return `${bullet} ${text}`;
+                    })
+                    .join("\n");
+
+                return `\n${rendered}\n`;
+            }
+
+            case "li":
+                /*
+                 * Handled by the ul/ol case above;
+                 * skip if encountered standalone.
+                 */
+                return renderInline(element);
+
+            case "br":
+                return "\n";
+
+            case "p":
+            case "div": {
+                const inner =
+                    renderInline(element).trim();
+
+                return inner ? `${inner}\n\n` : "";
+            }
+
+            case "hr":
+                return "\n---\n";
+
+            case "table": {
+                /*
+                 * Minimal table support: keep it
+                 * readable even if not perfectly
+                 * formatted markdown table syntax.
+                 */
+                const rows =
+                    Array.from(
+                        element.querySelectorAll("tr")
+                    );
+
+                const rendered = rows
+                    .map(row => {
+                        const cells =
+                            Array.from(
+                                row.querySelectorAll(
+                                    "td, th"
+                                )
+                            ).map(cell =>
+                                renderInline(
+                                    cell
+                                ).trim()
+                            );
+
+                        return `| ${cells.join(" | ")} |`;
+                    })
+                    .join("\n");
+
+                return `\n${rendered}\n`;
+            }
+
+            default:
+                /*
+                 * Unknown element - don't lose its
+                 * content, just recurse into children.
+                 */
+                return renderInline(element);
+        }
+    }
+
+    const result = renderInline(root);
+
+    /*
+     * Collapse 3+ consecutive blank lines down to
+     * at most one, which tends to accumulate from
+     * nested block elements.
+     */
+    return result
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+}
+
 let lastMessageCount = 0;
 
 function getVisibleMessages(): Message[] {
@@ -300,21 +514,23 @@ async function loadEntireConversation(): Promise<Message[]> {
             | undefined;
 
         if (isAssistant) {
-            content =
-                element
-                    .querySelector(
-                        ".markdown"
-                    )
-                    ?.textContent
-                    ?.trim();
+            const markdownElement =
+                element.querySelector(
+                    ".markdown"
+                );
+
+            content = markdownElement
+                ? htmlToMarkdown(markdownElement)
+                : undefined;
         } else {
-            content =
-                element
-                    .querySelector(
-                        ".user-message-bubble-color"
-                    )
-                    ?.textContent
-                    ?.trim();
+            const bubbleElement =
+                element.querySelector(
+                    ".user-message-bubble-color"
+                );
+
+            content = bubbleElement
+                ? htmlToMarkdown(bubbleElement)
+                : undefined;
         }
 
         if (!content) {

@@ -1,7 +1,7 @@
 {
     "manifest_version": 3,
     "name": "GPTExport",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "description": "Export ChatGPT conversations as Markdown.",
 
     "icons": {
@@ -11,7 +11,9 @@
     "permissions": [
         "activeTab",
         "clipboardWrite",
-        "offscreen"
+        "offscreen",
+        "downloads",
+        "storage"
     ],
 
     "background": {
@@ -35,5 +37,7 @@
         "default_icon": {
             "16": "icons/icon16.png"
         }
-    }
+    },
+
+    "options_page": "options.html"
 }

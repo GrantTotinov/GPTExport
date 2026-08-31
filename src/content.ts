@@ -219,120 +219,101 @@ function htmlToMarkdown(root: Element): string {
         .trim();
 }
 
-let lastMessageCount = 0;
-
-function getVisibleMessages(): Message[] {
-    const result: Message[] = [];
-
-    /*
-     * ---------------------------------------------------------
-     * ASSISTANT MESSAGES
-     * ---------------------------------------------------------
-     */
-    const assistantMessages = document.querySelectorAll(
+/*
+ * ---------------------------------------------------------
+ * SELECTORS
+ * ---------------------------------------------------------
+ *
+ * ChatGPT's DOM structure isn't a public API and can change
+ * without notice. Centralizing every selector here (with
+ * fallback alternatives) means a layout change only needs
+ * a fix in one place, and failures produce a clear error
+ * instead of a silently empty export.
+ */
+const SELECTORS = {
+    scrollContainer: [
+        "[data-scroll-root]",
+        "main [role=\"presentation\"]",
+        "main"
+    ],
+    messageContainer: [
+        '[data-message-author-role="assistant"], .text-message',
+        '[data-message-author-role]'
+    ],
+    assistantMessage: [
         '[data-message-author-role="assistant"]'
+    ],
+    assistantContent: [
+        ".markdown",
+        '[data-message-author-role="assistant"] .prose',
+        '[data-message-author-role="assistant"]'
+    ],
+    userContent: [
+        ".user-message-bubble-color",
+        '[data-message-author-role="user"] .whitespace-pre-wrap',
+        '[data-message-author-role="user"]'
+    ]
+} as const;
+
+/*
+ * ---------------------------------------------------------
+ * QUERY HELPERS WITH FALLBACK
+ * ---------------------------------------------------------
+ *
+ * Try each selector in order and return the first match.
+ * Throwing an explicit, actionable error (instead of
+ * quietly returning null/empty) turns a silent broken
+ * export into something the user can actually report.
+ */
+function queryOneWithFallback(
+    root: ParentNode,
+    selectors: readonly string[],
+    description: string
+): Element | null {
+    for (const selector of selectors) {
+        const found = root.querySelector(selector);
+
+        if (found) {
+            return found;
+        }
+    }
+
+    console.warn(
+        `GPTExport: could not find ${description} ` +
+        `using any known selector - ChatGPT's layout ` +
+        "may have changed. Selectors tried: " +
+        selectors.join(", ")
     );
 
-    for (const element of assistantMessages) {
-        const id =
-            element.getAttribute("data-message-id");
-
-        if (!id) {
-            continue;
-        }
-
-        const markdown =
-            element.querySelector(".markdown");
-
-        const content =
-            markdown?.textContent?.trim();
-
-        if (!content) {
-            continue;
-        }
-
-        result.push({
-            id,
-            role: "assistant",
-            content,
-            order: 0
-        });
-    }
-
-    /*
-     * ---------------------------------------------------------
-     * USER MESSAGES
-     * ---------------------------------------------------------
-     */
-    const userMessages =
-        document.querySelectorAll(".text-message");
-
-    for (const element of userMessages) {
-        const content =
-            element
-                .querySelector(
-                    ".user-message-bubble-color"
-                )
-                ?.textContent
-                ?.trim();
-
-        if (!content) {
-            continue;
-        }
-
-        result.push({
-            id: `user-${content}`,
-            role: "user",
-            content,
-            order: 0
-        });
-    }
-
-    return result;
+    return null;
 }
 
-function logVisibleMessages() {
-    const messages =
-        getVisibleMessages();
+function queryAllWithFallback(
+    root: ParentNode,
+    selectors: readonly string[],
+    description: string
+): Element[] {
+    for (const selector of selectors) {
+        const found = root.querySelectorAll(selector);
 
-    if (
-        messages.length !==
-        lastMessageCount
-    ) {
-        lastMessageCount =
-            messages.length;
-
-        console.log(
-            `GPTExport: ${messages.length} messages currently visible`
-        );
-
-        console.log(messages);
+        if (found.length > 0) {
+            return Array.from(found);
+        }
     }
+
+    console.warn(
+        `GPTExport: could not find any ${description} ` +
+        "using any known selector - ChatGPT's layout " +
+        "may have changed. Selectors tried: " +
+        selectors.join(", ")
+    );
+
+    return [];
 }
 
 console.log(
     "GPTExport loaded"
 );
-
-/*
- * ---------------------------------------------------------
- * MUTATION OBSERVER
- * ---------------------------------------------------------
- */
-const observer =
-    new MutationObserver(() => {
-        logVisibleMessages();
-    });
-
-observer.observe(
-    document.body,
-    {
-        childList: true,
-        subtree: true
-    }
-);
-
-logVisibleMessages();
 
 /*
  * ---------------------------------------------------------
@@ -402,16 +383,19 @@ async function loadEntireConversation(): Promise<Message[]> {
      * Find ChatGPT's scroll container.
      */
     const scrollContainer =
-        document.querySelector<HTMLElement>(
-            "[data-scroll-root]"
-        );
+        queryOneWithFallback(
+            document,
+            SELECTORS.scrollContainer,
+            "the conversation scroll container"
+        ) as HTMLElement | null;
 
     if (!scrollContainer) {
-        console.error(
-            "GPTExport: scroll container not found"
+        throw new Error(
+            "Couldn't find the conversation area on this " +
+            "page. ChatGPT may have changed its layout - " +
+            "please open an issue on the GPTExport GitHub " +
+            "repo with a screenshot of the browser console."
         );
-
-        return [];
     }
 
     console.log(
@@ -424,10 +408,10 @@ async function loadEntireConversation(): Promise<Message[]> {
      * ---------------------------------------------------------
      */
     function getMessageElements(): Element[] {
-        return Array.from(
-            document.querySelectorAll(
-                '[data-message-author-role="assistant"], .text-message'
-            )
+        return queryAllWithFallback(
+            document,
+            SELECTORS.messageContainer,
+            "conversation messages"
         );
     }
 
@@ -509,28 +493,26 @@ async function loadEntireConversation(): Promise<Message[]> {
                 ? "assistant"
                 : "user";
 
-        let content:
-            | string
-            | undefined;
+        let content: string;
 
         if (isAssistant) {
             const markdownElement =
-                element.querySelector(
-                    ".markdown"
-                );
+                queryOneWithFallback(
+                    element,
+                    SELECTORS.assistantContent,
+                    "assistant message content"
+                ) ?? element;
 
-            content = markdownElement
-                ? htmlToMarkdown(markdownElement)
-                : undefined;
+            content = htmlToMarkdown(markdownElement);
         } else {
             const bubbleElement =
-                element.querySelector(
-                    ".user-message-bubble-color"
-                );
+                queryOneWithFallback(
+                    element,
+                    SELECTORS.userContent,
+                    "user message content"
+                ) ?? element;
 
-            content = bubbleElement
-                ? htmlToMarkdown(bubbleElement)
-                : undefined;
+            content = htmlToMarkdown(bubbleElement);
         }
 
         if (!content) {
@@ -563,7 +545,28 @@ async function loadEntireConversation(): Promise<Message[]> {
     const before =
         new Map<string, Set<string>>();
 
+    /*
+     * Records the snapshot index (0, 1, 2, ...) in which
+     * each message was first seen. Since we scroll
+     * monotonically from the newest message toward the
+     * oldest, an earlier discovery index means a NEWER
+     * message. This acts as a fallback ordering signal for
+     * message pairs that never appeared in the same
+     * snapshot together (e.g. two separate lazy-load
+     * batches with no overlapping messages between them) -
+     * in that case the "before" graph has no edge between
+     * them at all, and topological sort would otherwise
+     * place them in arbitrary (discovery/insertion) order.
+     */
+    const discoveryIndex =
+        new Map<string, number>();
+
+    let snapshotCounter = 0;
+
     function collectVisibleMessages() {
+        const currentSnapshot =
+            snapshotCounter++;
+
         const elements =
             getMessageElements();
 
@@ -591,6 +594,11 @@ async function loadEntireConversation(): Promise<Message[]> {
                     message
                 );
 
+                discoveryIndex.set(
+                    message.id,
+                    currentSnapshot
+                );
+
                 console.log(
                     "GPTExport: collected",
                     message.role,
@@ -601,6 +609,19 @@ async function loadEntireConversation(): Promise<Message[]> {
                 );
             }
 
+            /*
+             * getBoundingClientRect().top is viewport-
+             * relative, which is exactly what we want here:
+             * all elements in THIS snapshot share the same
+             * scroll position at this instant, so their
+             * relative order is reliable. We only use this
+             * to order elements WITHIN a single snapshot
+             * (see the "before" graph below) - we never
+             * compare "top" values across different calls
+             * to collectVisibleMessages(), since the scroll
+             * position (and thus what "top" means) changes
+             * between calls.
+             */
             const rect =
                 element.getBoundingClientRect();
 
@@ -664,6 +685,54 @@ async function loadEntireConversation(): Promise<Message[]> {
     }
 
     /*
+     * Rather than guessing a fixed delay after each
+     * scroll step, we watch the scroll container with
+     * a MutationObserver and resolve as soon as it
+     * stops changing (settleMs of silence). This adapts
+     * automatically: fast renders don't wait longer than
+     * needed, slow renders on huge chats naturally get
+     * more time instead of being cut off.
+     */
+    const SETTLE_QUIET_MS = 150;
+    const SETTLE_MAX_MS = 2500;
+    const TOP_SETTLE_QUIET_MS = 400;
+    const TOP_SETTLE_MAX_MS = 2500;
+
+    /*
+     * How many consecutive iterations must show BOTH
+     * scrollTop <= 5 AND no growth in collected message
+     * count before we consider the conversation fully
+     * loaded. Very long conversations can lazy-load in
+     * many separate batches even after scrollTop visually
+     * hits 0 repeatedly - each batch briefly grows the
+     * scroll height again once it renders, then settles
+     * back at 0. Requiring several stable rounds (not
+     * just two) avoids stopping mid-batch.
+     */
+    const REQUIRED_STABLE_ROUNDS = 6;
+
+    /*
+     * ---------------------------------------------------------
+     * SCROLL TO BOTTOM FIRST
+     * ---------------------------------------------------------
+     *
+     * If the user has scrolled up mid-conversation before
+     * opening the popup, starting the upward scroll from
+     * that arbitrary position would silently skip every
+     * message below it (including the most recent ones).
+     * Jump to the bottom first so the upward scroll always
+     * starts from the actual end of the conversation.
+     */
+    scrollContainer.scrollTop =
+        scrollContainer.scrollHeight;
+
+    await waitForDomSettle(
+        scrollContainer,
+        TOP_SETTLE_QUIET_MS,
+        TOP_SETTLE_MAX_MS
+    );
+
+    /*
      * ---------------------------------------------------------
      * INITIAL COLLECTION
      * ---------------------------------------------------------
@@ -676,27 +745,18 @@ async function loadEntireConversation(): Promise<Message[]> {
      * ---------------------------------------------------------
      * SCROLL THROUGH CONVERSATION
      * ---------------------------------------------------------
-     *
-     * Rather than guessing a fixed delay after each
-     * scroll step, we watch the scroll container with
-     * a MutationObserver and resolve as soon as it
-     * stops changing (settleMs of silence). This adapts
-     * automatically: fast renders don't wait longer than
-     * needed, slow renders on huge chats naturally get
-     * more time instead of being cut off.
      */
-    const SETTLE_QUIET_MS = 150;
-    const SETTLE_MAX_MS = 2500;
-    const TOP_SETTLE_QUIET_MS = 300;
-    const TOP_SETTLE_MAX_MS = 1500;
 
     for (
         let iteration = 0;
-        iteration < 200;
+        iteration < 300;
         iteration++
     ) {
         const currentScrollTop =
             scrollContainer.scrollTop;
+
+        const collectedBeforeRound =
+            collected.size;
 
         const visible =
             collectVisibleMessages();
@@ -716,8 +776,6 @@ async function loadEntireConversation(): Promise<Message[]> {
         if (
             currentScrollTop <= 5
         ) {
-            topStableIterations++;
-
             /*
              * Give ChatGPT a window to render any
              * remaining older messages, but only as
@@ -732,19 +790,52 @@ async function loadEntireConversation(): Promise<Message[]> {
 
             collectVisibleMessages();
 
-            /*
-             * Require two stable checks.
-             */
-            if (
-                scrollContainer.scrollTop <= 5 &&
-                topStableIterations >= 2
-            ) {
+            const stillAtTop =
+                scrollContainer.scrollTop <= 5;
+
+            const stillGrowing =
+                collected.size > collectedBeforeRound;
+
+            if (stillAtTop && !stillGrowing) {
+                topStableIterations++;
+            } else {
+                /*
+                 * Either we got bumped away from the
+                 * top (more content loaded above,
+                 * pushing scroll position down) or new
+                 * messages just appeared - either way,
+                 * this wasn't a stable round. Reset and
+                 * keep trying; the next iterations will
+                 * scroll up further into whatever just
+                 * loaded.
+                 */
+                topStableIterations = 0;
+            }
+
+            if (topStableIterations >= REQUIRED_STABLE_ROUNDS) {
                 console.log(
                     "GPTExport: reached top"
                 );
 
                 break;
             }
+
+            /*
+             * Nudge: some lazy-loading triggers need an
+             * actual scroll event to fire (not just
+             * sitting at position 0) to fetch the next
+             * batch of older messages. Bump down and
+             * back up before the next round.
+             */
+            scrollContainer.scrollTop = 40;
+
+            await waitForDomSettle(
+                scrollContainer,
+                150,
+                600
+            );
+
+            scrollContainer.scrollTop = 0;
         } else {
             topStableIterations = 0;
         }
@@ -848,10 +939,20 @@ async function loadEntireConversation(): Promise<Message[]> {
     }
 
     /*
-     * Messages with no incoming
-     * relationships come first.
+     * Messages with no incoming relationships are
+     * available to be placed next. Instead of a plain
+     * FIFO queue (which would fall back to arbitrary
+     * insertion order whenever multiple messages become
+     * available at once with no "before" edge between
+     * them - e.g. two disconnected lazy-load batches),
+     * we always pick the available message with the
+     * earliest discovery index. Since we scroll from
+     * newest to oldest, earlier discovery = newer
+     * message, so this keeps disconnected batches in
+     * the right relative order even without a direct
+     * graph edge between them.
      */
-    const queue: string[] = [];
+    const available: string[] = [];
 
     for (const message of messages) {
         if (
@@ -861,10 +962,45 @@ async function loadEntireConversation(): Promise<Message[]> {
                 ) ?? 0
             ) === 0
         ) {
-            queue.push(
+            available.push(
                 message.id
             );
         }
+    }
+
+    function takeEarliestDiscovered(): string {
+        let bestIndex = 0;
+
+        let bestDiscovery =
+            discoveryIndex.get(
+                available[0]
+            ) ?? Number.MAX_SAFE_INTEGER;
+
+        for (
+            let i = 1;
+            i < available.length;
+            i++
+        ) {
+            const candidateDiscovery =
+                discoveryIndex.get(
+                    available[i]
+                ) ?? Number.MAX_SAFE_INTEGER;
+
+            if (
+                candidateDiscovery <
+                bestDiscovery
+            ) {
+                bestDiscovery =
+                    candidateDiscovery;
+
+                bestIndex = i;
+            }
+        }
+
+        const [id] =
+            available.splice(bestIndex, 1);
+
+        return id;
     }
 
     const orderedIds: string[] = [];
@@ -873,10 +1009,10 @@ async function loadEntireConversation(): Promise<Message[]> {
      * Topological sort.
      */
     while (
-        queue.length > 0
+        available.length > 0
     ) {
         const id =
-            queue.shift()!;
+            takeEarliestDiscovered();
 
         orderedIds.push(id);
 
@@ -904,7 +1040,7 @@ async function loadEntireConversation(): Promise<Message[]> {
             );
 
             if (count === 0) {
-                queue.push(
+                available.push(
                     followingId
                 );
             }
@@ -1032,40 +1168,46 @@ window.postMessage(
  * CHROME MESSAGE HANDLER
  * ---------------------------------------------------------
  */
- chrome.runtime.onMessage.addListener(
-     async (message, _sender, sendResponse) => {
-         if (message.type !== "LOAD_CONVERSATION") {
-             return;
-         }
- 
-         try {
-             console.log(
-                 "GPTExport: LOAD_CONVERSATION received"
-             );
- 
-             const result =
-                 await loadEntireConversation();
- 
-             console.log(
-                 "GPTExport: sending conversation",
-                 result
-             );
- 
-             sendResponse({
-                 success: true,
-                 data: result
-             });
- 
-         } catch (error) {
-             console.error(
-                 "GPTExport: failed to load conversation",
-                 error
-             );
- 
-             sendResponse({
-                 success: false,
-                 error: String(error)
-             });
-         }
-     }
- );
+chrome.runtime.onMessage.addListener(
+    (message, _sender, sendResponse) => {
+        if (message.type !== "LOAD_CONVERSATION") {
+            return false;
+        }
+
+        (async () => {
+            try {
+                console.log(
+                    "GPTExport: LOAD_CONVERSATION received"
+                );
+
+                const result =
+                    await loadEntireConversation();
+
+                console.log(
+                    "GPTExport: sending conversation",
+                    result
+                );
+
+                sendResponse({
+                    success: true,
+                    data: result
+                });
+            } catch (error) {
+                console.error(
+                    "GPTExport: failed to load conversation",
+                    error
+                );
+
+                sendResponse({
+                    success: false,
+                    error:
+                        error instanceof Error
+                            ? error.message
+                            : String(error)
+                });
+            }
+        })();
+
+        return true;
+    }
+);

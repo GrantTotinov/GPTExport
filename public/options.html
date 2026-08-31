@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPTExport Settings</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            max-width: 480px;
+            margin: 40px auto;
+            padding: 0 16px;
+            color: #1a1a1a;
+        }
+
+        h1 {
+            font-size: 18px;
+            margin-bottom: 4px;
+        }
+
+        p.subtitle {
+            color: #666666;
+            font-size: 13px;
+            margin-top: 0;
+            margin-bottom: 28px;
+        }
+
+        fieldset {
+            border: 1px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 14px 16px;
+            margin-bottom: 16px;
+        }
+
+        legend {
+            font-weight: 600;
+            font-size: 13px;
+            padding: 0 6px;
+        }
+
+        label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 13px;
+            padding: 6px 0;
+            cursor: pointer;
+        }
+
+        select {
+            font-size: 13px;
+            padding: 4px 6px;
+            border-radius: 4px;
+            border: 1px solid #d0d0d0;
+        }
+
+        #save {
+            background: #10a37f;
+            color: #ffffff;
+            border: none;
+            border-radius: 6px;
+            padding: 9px 18px;
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        #save:hover {
+            background: #0d8e6d;
+        }
+
+        #status {
+            font-size: 12px;
+            color: #10a37f;
+            margin-left: 10px;
+            opacity: 0;
+            transition: opacity 0.2s;
+        }
+
+        #status.visible {
+            opacity: 1;
+        }
+
+        .row {
+            display: flex;
+            align-items: center;
+        }
+    </style>
+</head>
+<body>
+    <h1>GPTExport Settings</h1>
+    <p class="subtitle">These preferences apply to every export.</p>
+
+    <fieldset>
+        <legend>Message headings</legend>
+        <label>
+            <input type="radio" name="headingStyle" value="h2">
+            Markdown heading (<code>## User</code>)
+        </label>
+        <label>
+            <input type="radio" name="headingStyle" value="bold">
+            Bold label (<code>**User:**</code>)
+        </label>
+        <label>
+            <input type="radio" name="headingStyle" value="none">
+            No heading
+        </label>
+    </fieldset>
+
+    <fieldset>
+        <legend>Timestamp</legend>
+        <label>
+            <input type="checkbox" id="includeTimestamp">
+            Include export date/time at the top of the file
+        </label>
+    </fieldset>
+
+    <fieldset>
+        <legend>Spacing between messages</legend>
+        <label>
+            <input type="radio" name="messageSeparator" value="single">
+            Single blank line
+        </label>
+        <label>
+            <input type="radio" name="messageSeparator" value="double">
+            Double blank line
+        </label>
+        <label>
+            <input type="radio" name="messageSeparator" value="rule">
+            Horizontal rule (<code>---</code>)
+        </label>
+    </fieldset>
+
+    <div class="row">
+        <button id="save">Save Settings</button>
+        <span id="status">Saved</span>
+    </div>
+
+    <script type="module" src="/options.js"></script>
+</body>
+</html>

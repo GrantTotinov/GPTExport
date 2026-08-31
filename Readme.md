@@ -6,9 +6,11 @@ A small Chrome extension that exports a ChatGPT conversation to Markdown and cop
 
 - Exports the **entire** conversation, not just what's currently rendered — ChatGPT virtualizes long chats (removes old messages from the DOM as you scroll), so the extension auto-scrolls to the top first and collects every message along the way.
 - Preserves formatting: code blocks (with language tags), lists, bold/italic, links, headings, and blockquotes are converted to proper Markdown instead of being flattened to plain text.
-- Copies straight to your clipboard — paste anywhere.
+- **Copy to clipboard** or **download as a `.md` file** — the download gets an automatic filename built from the conversation title and today's date.
+- **Settings page** to customize heading style, message spacing, and whether to include an export timestamp.
 - Live progress feedback while scrolling long conversations.
-- No external requests, no analytics, no permissions beyond what's needed to read the active ChatGPT tab and write to the clipboard.
+- Falls back gracefully if ChatGPT changes its layout: the extension tries several known selectors before giving up, and reports a clear error instead of silently exporting nothing.
+- No external requests, no analytics, no permissions beyond what's needed to read the active ChatGPT tab, write to the clipboard, save a file, and store your settings.
 
 ## Installing (unpacked, for development/testing)
 
@@ -28,9 +30,11 @@ A small Chrome extension that exports a ChatGPT conversation to Markdown and cop
 
 1. Open any conversation on `chatgpt.com`.
 2. Click the GPTExport icon in your toolbar.
-3. Click **Export Conversation**.
-4. The extension scrolls through the full conversation, converts it to Markdown, and copies it to your clipboard.
-5. Paste (`Ctrl+V` / `Cmd+V`) wherever you like.
+3. Click **Copy Conversation** to copy the Markdown straight to your clipboard, or click **Export Conversation** to open a small menu and pick **.md** or **.txt** to download instead (the `.txt` option strips Markdown syntax down to plain text).
+4. The extension scrolls through the full conversation and either copies or downloads it depending on what you picked.
+5. If you copied, paste (`Ctrl+V` / `Cmd+V`) wherever you like.
+
+Click **Settings** at the bottom of the popup to customize heading style (`## User` / `**User:**` / none), spacing between messages, and whether to include an export timestamp.
 
 ## How it works
 
@@ -43,12 +47,16 @@ A small Chrome extension that exports a ChatGPT conversation to Markdown and cop
 ```
 src/
   content.ts      # Runs on chatgpt.com, scrolls + extracts messages
-  popup.ts        # Popup UI logic
+  popup.ts        # Popup UI logic (copy + export menu)
+  markdown-strip.ts # Converts generated Markdown to plain text for .txt export
+  options.ts       # Settings page logic
+  settings.ts      # Shared settings types/defaults (used by popup + options)
   background.ts   # Service worker, coordinates the offscreen document
   offscreen.ts     # Clipboard write (offscreen document)
 public/
   manifest.json
   popup.html
+  options.html
   offscreen.html
   icons/
 ```

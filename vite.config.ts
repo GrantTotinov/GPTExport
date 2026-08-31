@@ -7,7 +7,8 @@ export default defineConfig({
                 content: "src/content.ts",
                 popup: "src/popup.ts",
                 background: "src/background.ts",
-                offscreen: "src/offscreen.ts"
+                offscreen: "src/offscreen.ts",
+                options: "src/options.ts"
             },
             output: {
                 entryFileNames: "[name].js"

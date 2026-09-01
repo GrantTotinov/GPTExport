@@ -376,6 +376,37 @@ async function loadEntireConversation(): Promise<Message[]> {
 
     /*
      * -----------------------------------------------------
+     * SCROLL TO BOTTOM FIRST
+     * -----------------------------------------------------
+     *
+     * If the user has manually scrolled the page (up to an
+     * older point, or anywhere that isn't the very bottom)
+     * before clicking Copy/Export, the upward scroll loop
+     * below would start from that arbitrary position and
+     * only ever collect messages between there and the top -
+     * silently missing everything below it, including the
+     * newest messages. Confirmed by testing: scrolling
+     * manually to the middle of a 12-message conversation
+     * before exporting produced only 6 collected messages,
+     * exactly the ones between the manual scroll position
+     * and the top.
+     *
+     * Forcing scrollTop to the max first (with a dispatched
+     * scroll event, same as every other programmatic scroll
+     * in this file - see scrollAndDispatch) guarantees the
+     * upward pass always starts from the true end of the
+     * conversation, regardless of where the user's own
+     * scrolling left the page.
+     */
+    scrollAndDispatch(
+        scrollContainer,
+        scrollContainer.scrollHeight
+    );
+
+    await wait(1000);
+
+    /*
+     * -----------------------------------------------------
      * INITIAL COLLECTION
      * -----------------------------------------------------
      */
@@ -947,6 +978,61 @@ window.postMessage(
  * CHROME MESSAGE HANDLER
  * ---------------------------------------------------------
  */
+/*
+ * ---------------------------------------------------------
+ * CONCURRENCY GUARD
+ * ---------------------------------------------------------
+ *
+ * loadEntireConversation() scrolls the live page and reads
+ * DOM positions (getBoundingClientRect) to reconstruct
+ * message order. If a second LOAD_CONVERSATION message
+ * arrives while a run is still in progress - e.g. the popup
+ * gets clicked more than once, or a background/throttled
+ * tab is slow to respond so the popup retries - a second
+ * run starts scrolling and collecting against the SAME DOM
+ * at the same time. The two runs' snapshots interleave
+ * randomly, which is exactly what produced results where
+ * every message had "order: 0": the topological sort ran
+ * against a "before" graph built from two different runs'
+ * positions, which is meaningless.
+ *
+ * Instead of letting a second call start a second scroll
+ * pass, any LOAD_CONVERSATION that arrives while a run is
+ * already in flight just awaits and returns the SAME
+ * in-progress result. This guarantees only one
+ * loadEntireConversation() ever touches the DOM at a time,
+ * regardless of how many times the message fires.
+ */
+let inFlightLoad: Promise<Message[]> | null = null;
+
+function loadEntireConversationSingleFlight(): Promise<Message[]> {
+    if (inFlightLoad) {
+        console.log(
+            "GPTExport: LOAD_CONVERSATION already in " +
+            "progress, reusing existing run instead of " +
+            "starting a second one"
+        );
+
+        return inFlightLoad;
+    }
+
+    const run = loadEntireConversation().finally(() => {
+        /*
+         * Only clear the slot if we're still the current
+         * run (defensive; in practice always true since
+         * this is single-threaded JS, but keeps intent
+         * explicit).
+         */
+        if (inFlightLoad === run) {
+            inFlightLoad = null;
+        }
+    });
+
+    inFlightLoad = run;
+
+    return run;
+}
+
 chrome.runtime.onMessage.addListener(
     (
         message: {
@@ -966,7 +1052,7 @@ chrome.runtime.onMessage.addListener(
             "GPTExport: LOAD_CONVERSATION received"
         );
 
-        loadEntireConversation()
+        loadEntireConversationSingleFlight()
             .then(result => {
                 console.log(
                     "GPTExport: sending conversation",

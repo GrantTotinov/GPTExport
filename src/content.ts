@@ -96,6 +96,105 @@ function wait(ms: number): Promise<void> {
 
 /*
  * ---------------------------------------------------------
+ * QUIET-PERIOD WAIT (FAST PATH)
+ * ---------------------------------------------------------
+ *
+ * Resolves as soon as `target` has gone quietMs without any
+ * child/subtree mutation, or after maxMs regardless. Unlike
+ * waitForHeightChange (which always waits for a change or
+ * times out at the full maxMs), this returns quickly when
+ * nothing is happening - which is the common case for most
+ * scroll steps, since they usually just scroll into content
+ * that's already mounted. Only genuinely slow renders (new
+ * batch loading, background tab throttling) end up using
+ * more of the maxMs budget.
+ */
+function waitForQuiet(
+    target: HTMLElement,
+    quietMs: number,
+    maxMs: number
+): Promise<void> {
+    return new Promise(resolve => {
+        let settleTimer: ReturnType<typeof setTimeout>;
+
+        const finish = () => {
+            clearTimeout(settleTimer);
+            clearTimeout(hardTimer);
+            observer.disconnect();
+            resolve();
+        };
+
+        const observer = new MutationObserver(() => {
+            clearTimeout(settleTimer);
+            settleTimer = setTimeout(finish, quietMs);
+        });
+
+        observer.observe(target, {
+            childList: true,
+            subtree: true
+        });
+
+        /*
+         * Start the quiet timer immediately too, in case
+         * no mutation happens at all (nothing new to
+         * render for this step).
+         */
+        settleTimer = setTimeout(finish, quietMs);
+
+        const hardTimer = setTimeout(finish, maxMs);
+    });
+}
+
+/*
+ * ---------------------------------------------------------
+ * POLLING WAIT (BACKGROUND-TAB SAFE)
+ * ---------------------------------------------------------
+ *
+ * A single fixed wait(1000) is not reliable when the
+ * ChatGPT tab is in the background: Chrome throttles both
+ * timers AND rendering work in background tabs, so the same
+ * 1000ms that's plenty of time in the foreground can pass
+ * with the page not having actually re-rendered yet.
+ * Confirmed by testing: the exact same scroll-to-bottom
+ * step that reliably collected all 12 messages in the
+ * foreground collected only 5 when the tab was in the
+ * background, because scrollHeight never grew during the
+ * fixed wait window.
+ *
+ * Instead of waiting a flat amount of time, poll scrollHeight
+ * at short intervals and return as soon as it changes (or as
+ * soon as maxMs is reached as a safety cap). This adapts to
+ * however long the background tab actually needs, rather
+ * than gambling on a single guess.
+ */
+async function waitForHeightChange(
+    element: HTMLElement,
+    startingHeight: number,
+    maxMs: number
+): Promise<number> {
+    const pollIntervalMs = 150;
+    const deadline = Date.now() + maxMs;
+
+    while (Date.now() < deadline) {
+        await wait(pollIntervalMs);
+
+        if (element.scrollHeight !== startingHeight) {
+            /*
+             * Height changed - give it one more short beat
+             * to finish settling (e.g. images/markdown
+             * still laying out) before returning.
+             */
+            await wait(pollIntervalMs);
+
+            return element.scrollHeight;
+        }
+    }
+
+    return element.scrollHeight;
+}
+
+/*
+ * ---------------------------------------------------------
  * SCROLL HELPER
  * ---------------------------------------------------------
  *
@@ -398,12 +497,25 @@ async function loadEntireConversation(): Promise<Message[]> {
      * conversation, regardless of where the user's own
      * scrolling left the page.
      */
+    const heightBeforeBottomScroll =
+        scrollContainer.scrollHeight;
+
     scrollAndDispatch(
         scrollContainer,
         scrollContainer.scrollHeight
     );
 
-    await wait(1000);
+    /*
+     * Poll instead of a fixed wait - see
+     * waitForHeightChange for why this matters
+     * specifically for background tabs. 5000ms cap is
+     * generous since this only runs once per export.
+     */
+    await waitForHeightChange(
+        scrollContainer,
+        heightBeforeBottomScroll,
+        2500
+    );
 
     /*
      * -----------------------------------------------------
@@ -436,7 +548,7 @@ async function loadEntireConversation(): Promise<Message[]> {
      * Number of consecutive checks required before we
      * decide that there really are no more older messages.
      */
-    const REQUIRED_STABLE_ROUNDS = 5;
+    const REQUIRED_STABLE_ROUNDS = 3;
 
     /*
      * -----------------------------------------------------
@@ -508,6 +620,9 @@ async function loadEntireConversation(): Promise<Message[]> {
                 0
             );
 
+            const heightBeforeNudge =
+                scrollContainer.scrollHeight;
+
             /*
              * Give ChatGPT's React renderer time to:
              *
@@ -515,8 +630,24 @@ async function loadEntireConversation(): Promise<Message[]> {
              * - mount older messages
              * - change scrollHeight
              * - perform scroll anchoring
+             *
+             * Polling instead of a fixed wait matters
+             * most right here: this check decides whether
+             * we conclude the conversation is fully
+             * loaded. A background-throttled render that
+             * simply needs more time must not be
+             * mistaken for "nothing more to load" -
+             * confirmed by testing that a fixed 1200ms
+             * wait was sometimes too short in a
+             * background tab, causing the loop to stop
+             * with only a fraction of the conversation
+             * collected.
              */
-            await wait(1200);
+            await waitForHeightChange(
+                scrollContainer,
+                heightBeforeNudge,
+                2000
+            );
 
             /*
              * Collect anything that appeared.
@@ -672,9 +803,25 @@ async function loadEntireConversation(): Promise<Message[]> {
         );
 
         /*
-         * Wait for React / virtualization.
+         * Wait for React / virtualization, but adaptively
+         * instead of a flat delay. Most scroll steps just
+         * reveal content that's already mounted (fast -
+         * settles in well under 200ms), while occasional
+         * steps trigger an actual batch load (slower,
+         * especially in a background tab). A flat wait
+         * long enough for the slow case makes every single
+         * step pay the slow-case cost, which is what made
+         * a 12-message conversation take way too long.
+         * waitForQuiet resolves as soon as the DOM stops
+         * changing for quietMs, so fast steps finish fast
+         * and only genuinely slow steps use more of the
+         * maxMs budget.
          */
-        await wait(900);
+        await waitForQuiet(
+            scrollContainer,
+            120,
+            1800
+        );
 
         /*
          * Collect after render.
@@ -754,7 +901,7 @@ async function loadEntireConversation(): Promise<Message[]> {
      * FINAL COLLECTION
      * -----------------------------------------------------
      */
-    await wait(1000);
+    await wait(1500);
 
     collectVisibleMessages();
 

@@ -31,6 +31,17 @@
         }
     ],
 
+    "web_accessible_resources": [
+        {
+            "resources": [
+                "pageBridge.js"
+            ],
+            "matches": [
+                "https://chatgpt.com/*"
+            ]
+        }
+    ],
+
     "action": {
         "default_title": "GPTExport",
         "default_popup": "popup.html",

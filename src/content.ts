@@ -1,3 +1,75 @@
+/*
+ * =========================================================
+ * GPTExport - content.ts
+ * =========================================================
+ *
+ * The content script:
+ *
+ * 1. Injects pageBridge.js into ChatGPT's MAIN world.
+ * 2. Requests conversation pages from the bridge.
+ * 3. Paginates backwards through the ChatGPT conversation API.
+ * 4. Converts API messages into the format expected by popup.ts.
+ *
+ * No DOM scrolling is used.
+ * No conversation credentials are stored by this file.
+ */
+
+/*
+ * ---------------------------------------------------------
+ * PAGE BRIDGE INJECTION
+ * ---------------------------------------------------------
+ */
+
+function injectPageBridge(): void {
+    if (
+        document.documentElement.dataset
+            .gptExportBridgeInjected === "true"
+    ) {
+        return;
+    }
+
+    const script =
+        document.createElement("script");
+
+    script.src =
+        chrome.runtime.getURL(
+            "pageBridge.js"
+        );
+
+    script.dataset.gptExport =
+        "page-bridge";
+
+    script.onload = () => {
+        script.remove();
+
+        console.log(
+            "GPTExport: page bridge injected"
+        );
+    };
+
+    script.onerror = () => {
+        console.error(
+            "GPTExport: failed to inject page bridge"
+        );
+    };
+
+    (
+        document.head ||
+        document.documentElement
+    ).appendChild(script);
+
+    document.documentElement.dataset
+        .gptExportBridgeInjected = "true";
+}
+
+injectPageBridge();
+
+/*
+ * ---------------------------------------------------------
+ * EXPORT MESSAGE TYPE
+ * ---------------------------------------------------------
+ */
+
 interface Message {
     id: string;
     role: "user" | "assistant";
@@ -5,1086 +77,686 @@ interface Message {
     order: number;
 }
 
-let lastMessageCount = 0;
+/*
+ * ---------------------------------------------------------
+ * CHATGPT API TYPES
+ * ---------------------------------------------------------
+ */
 
-function getVisibleMessages(): Message[] {
-    const result: Message[] = [];
+interface ApiMessage {
+    id?: string;
 
-    // Assistant messages
-    const assistantMessages = document.querySelectorAll(
-        '[data-message-author-role="assistant"]'
-    );
+    author?: {
+        role?: string;
+    };
 
-    for (const element of assistantMessages) {
-        const id = element.getAttribute("data-message-id");
+    create_time?: number | null;
 
-        if (!id) {
-            continue;
-        }
+    content?: {
+        content_type?: string;
+        parts?: unknown[];
+    };
 
-        const markdown = element.querySelector(".markdown");
-        const content = markdown?.textContent?.trim();
-
-        if (!content) {
-            continue;
-        }
-
-        result.push({
-            id,
-            role: "assistant",
-            content,
-            order: 0
-        });
-    }
-
-    // User messages
-    const userMessages = document.querySelectorAll(
-        ".text-message"
-    );
-
-    for (const element of userMessages) {
-        const content = element
-            .querySelector(".user-message-bubble-color")
-            ?.textContent
-            ?.trim();
-
-        if (!content) {
-            continue;
-        }
-
-        result.push({
-            id: `user-${content}`,
-            role: "user",
-            content,
-            order: 0
-        });
-    }
-
-    return result;
+    metadata?: {
+        is_visually_hidden_from_conversation?: boolean;
+    };
 }
 
-function logVisibleMessages(): void {
-    const messages = getVisibleMessages();
+interface ConversationPage {
+    messages?: ApiMessage[];
 
-    if (messages.length !== lastMessageCount) {
-        lastMessageCount = messages.length;
+    page_info?: {
+        start_cursor?: string | null;
+        end_cursor?: string | null;
+        has_previous_page?: boolean;
+        has_next_page?: boolean;
+    };
+}
 
-        console.log(
-            `GPTExport: ${messages.length} messages currently visible`
+/*
+ * ---------------------------------------------------------
+ * CONVERSATION ID
+ * ---------------------------------------------------------
+ */
+
+function getConversationIdFromUrl(): string | null {
+    const match =
+        window.location.pathname.match(
+            /\/c\/([0-9a-f-]{36})(?:\/|$)/i
         );
 
-        console.log(messages);
+    return match?.[1] ?? null;
+}
+
+/*
+ * ---------------------------------------------------------
+ * API MESSAGE TEXT
+ * ---------------------------------------------------------
+ */
+
+function extractApiMessageText(
+    message: ApiMessage
+): string {
+    const parts =
+        message.content?.parts;
+
+    if (!Array.isArray(parts)) {
+        return "";
     }
-}
 
-console.log("GPTExport loaded");
-
-const observer = new MutationObserver(() => {
-    logVisibleMessages();
-});
-
-observer.observe(document.body, {
-    childList: true,
-    subtree: true
-});
-
-logVisibleMessages();
-
-function wait(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return parts
+        .filter(
+            (part): part is string =>
+                typeof part === "string"
+        )
+        .join("\n")
+        .trim();
 }
 
 /*
  * ---------------------------------------------------------
- * QUIET-PERIOD WAIT (FAST PATH)
+ * PAGE BRIDGE REQUEST
  * ---------------------------------------------------------
  *
- * Resolves as soon as `target` has gone quietMs without any
- * child/subtree mutation, or after maxMs regardless. Unlike
- * waitForHeightChange (which always waits for a change or
- * times out at the full maxMs), this returns quickly when
- * nothing is happening - which is the common case for most
- * scroll steps, since they usually just scroll into content
- * that's already mounted. Only genuinely slow renders (new
- * batch loading, background tab throttling) end up using
- * more of the maxMs budget.
+ * content.ts cannot directly access the authenticated
+ * ChatGPT fetch context.
+ *
+ * pageBridge.js runs in ChatGPT's MAIN world and performs
+ * the authenticated request.
+ *
+ * Communication:
+ *
+ * content.ts
+ *     |
+ *     | window.postMessage()
+ *     v
+ *
+ * pageBridge.js
+ *     |
+ *     | authenticated fetch()
+ *     v
+ *
+ * ChatGPT backend
+ *
+ *     |
+ *     | JSON
+ *     v
+ *
+ * pageBridge.js
+ *     |
+ *     | window.postMessage()
+ *     v
+ *
+ * content.ts
  */
-function waitForQuiet(
-    target: HTMLElement,
-    quietMs: number,
-    maxMs: number
-): Promise<void> {
-    return new Promise(resolve => {
-        let settleTimer: ReturnType<typeof setTimeout>;
 
-        const finish = () => {
-            clearTimeout(settleTimer);
-            clearTimeout(hardTimer);
-            observer.disconnect();
-            resolve();
-        };
-
-        const observer = new MutationObserver(() => {
-            clearTimeout(settleTimer);
-            settleTimer = setTimeout(finish, quietMs);
-        });
-
-        observer.observe(target, {
-            childList: true,
-            subtree: true
-        });
-
-        /*
-         * Start the quiet timer immediately too, in case
-         * no mutation happens at all (nothing new to
-         * render for this step).
-         */
-        settleTimer = setTimeout(finish, quietMs);
-
-        const hardTimer = setTimeout(finish, maxMs);
-    });
+interface BridgeResponse {
+    source?: string;
+    type?: string;
+    requestId?: string;
+    data?: ConversationPage;
+    error?: string;
 }
 
-/*
- * ---------------------------------------------------------
- * POLLING WAIT (BACKGROUND-TAB SAFE)
- * ---------------------------------------------------------
- *
- * A single fixed wait(1000) is not reliable when the
- * ChatGPT tab is in the background: Chrome throttles both
- * timers AND rendering work in background tabs, so the same
- * 1000ms that's plenty of time in the foreground can pass
- * with the page not having actually re-rendered yet.
- * Confirmed by testing: the exact same scroll-to-bottom
- * step that reliably collected all 12 messages in the
- * foreground collected only 5 when the tab was in the
- * background, because scrollHeight never grew during the
- * fixed wait window.
- *
- * Instead of waiting a flat amount of time, poll scrollHeight
- * at short intervals and return as soon as it changes (or as
- * soon as maxMs is reached as a safety cap). This adapts to
- * however long the background tab actually needs, rather
- * than gambling on a single guess.
- */
-async function waitForHeightChange(
-    element: HTMLElement,
-    startingHeight: number,
-    maxMs: number
-): Promise<number> {
-    const pollIntervalMs = 150;
-    const deadline = Date.now() + maxMs;
+function fetchConversationPage(
+    url: string
+): Promise<ConversationPage> {
+    return new Promise(
+        (resolve, reject) => {
+            const requestId =
+                crypto.randomUUID();
 
-    while (Date.now() < deadline) {
-        await wait(pollIntervalMs);
+            let finished = false;
 
-        if (element.scrollHeight !== startingHeight) {
+            const cleanup = (): void => {
+                window.removeEventListener(
+                    "message",
+                    handleMessage
+                );
+            };
+
+            const finishError = (
+                error: Error
+            ): void => {
+                if (finished) {
+                    return;
+                }
+
+                finished = true;
+                cleanup();
+                reject(error);
+            };
+
+            const handleMessage = (
+                event: MessageEvent<BridgeResponse>
+            ): void => {
+                if (
+                    event.source !== window
+                ) {
+                    return;
+                }
+
+                const data =
+                    event.data;
+
+                if (
+                    !data ||
+                    data.source !==
+                        "GPTExport"
+                ) {
+                    return;
+                }
+
+                if (
+                    data.requestId !==
+                    requestId
+                ) {
+                    return;
+                }
+
+                if (
+                    data.type ===
+                    "GPTEXPORT_API_ERROR"
+                ) {
+                    finishError(
+                        new Error(
+                            data.error ??
+                                "Unknown error from GPTExport page bridge."
+                        )
+                    );
+
+                    return;
+                }
+
+                if (
+                    data.type !==
+                    "GPTEXPORT_API_RESPONSE"
+                ) {
+                    return;
+                }
+
+                if (!data.data) {
+                    finishError(
+                        new Error(
+                            "GPTExport page bridge returned an empty API response."
+                        )
+                    );
+
+                    return;
+                }
+
+                if (finished) {
+                    return;
+                }
+
+                finished = true;
+
+                cleanup();
+
+                resolve(
+                    data.data
+                );
+            };
+
+            window.addEventListener(
+                "message",
+                handleMessage
+            );
+
+            console.log(
+                "GPTExport: requesting API page through bridge",
+                url
+            );
+
+            window.postMessage(
+                {
+                    source:
+                        "GPTExport",
+                    type:
+                        "GPTEXPORT_API_REQUEST",
+                    requestId,
+                    url
+                },
+                "*"
+            );
+
             /*
-             * Height changed - give it one more short beat
-             * to finish settling (e.g. images/markdown
-             * still laying out) before returning.
+             * Safety timeout.
+             *
+             * If the bridge does not respond, don't leave
+             * the Promise hanging forever.
              */
-            await wait(pollIntervalMs);
+            window.setTimeout(
+                () => {
+                    if (finished) {
+                        return;
+                    }
 
-            return element.scrollHeight;
+                    finishError(
+                        new Error(
+                            "GPTExport page bridge timed out while requesting the conversation API."
+                        )
+                    );
+                },
+                30000
+            );
+        }
+    );
+}
+
+/*
+ * ---------------------------------------------------------
+ * LOAD ENTIRE CONVERSATION VIA API
+ * ---------------------------------------------------------
+ *
+ * Initial request:
+ *
+ * /backend-api/conversations/{id}
+ *     ?include_has_versions=true
+ *     &num_turns=10
+ *
+ * Older messages:
+ *
+ * /backend-api/conversations/{id}/messages
+ *     ?before={start_cursor}
+ *     &include_has_versions=true
+ *     &num_turns=10
+ *
+ * Pagination continues until:
+ *
+ * has_previous_page === false
+ *
+ * This avoids DOM virtualization and scrolling entirely.
+ */
+
+/*
+ * Prevent an export from starting before the bridge
+ * has had a chance to initialize.
+ */
+let bridgeReady = false;
+
+window.addEventListener(
+    "message",
+    event => {
+        if (
+            event.source !== window
+        ) {
+            return;
+        }
+
+        if (
+            !event.data ||
+            event.data.source !==
+                "GPTExport"
+        ) {
+            return;
+        }
+
+        if (
+            event.data.type ===
+            "BRIDGE_READY"
+        ) {
+            bridgeReady = true;
+
+            console.log(
+                "GPTExport: page bridge ready"
+            );
         }
     }
+);
 
-    return element.scrollHeight;
-}
+async function waitForBridge(): Promise<void> {
+    if (bridgeReady) {
+        return;
+    }
 
-/*
- * ---------------------------------------------------------
- * SCROLL HELPER
- * ---------------------------------------------------------
- *
- * Changing scrollTop alone is not reliable enough with
- * ChatGPT's virtualized conversation.
- *
- * ChatGPT's renderer reacts to actual scroll events.
- *
- * Therefore every programmatic scroll also dispatches
- * an explicit scroll event.
- */
-function scrollAndDispatch(
-    element: HTMLElement,
-    top: number
-): void {
-    element.scrollTop = Math.max(0, top);
+    /*
+     * Give the injected MAIN-world script a short time
+     * to initialize.
+     */
+    const timeoutMs = 5000;
+    const intervalMs = 50;
 
-    element.dispatchEvent(
-        new Event("scroll", {
-            bubbles: true
-        })
-    );
-}
+    const started =
+        Date.now();
 
-/*
- * ---------------------------------------------------------
- * LOAD ENTIRE CONVERSATION
- * ---------------------------------------------------------
- */
-async function loadEntireConversation(): Promise<Message[]> {
-    const collected = new Map<string, Message>();
-
-    const scrollContainer = document.querySelector<HTMLElement>(
-        "[data-scroll-root]"
-    );
-
-    if (!scrollContainer) {
-        console.error(
-            "GPTExport: scroll container not found"
+    while (
+        !bridgeReady &&
+        Date.now() - started <
+            timeoutMs
+    ) {
+        await new Promise<void>(
+            resolve =>
+                window.setTimeout(
+                    resolve,
+                    intervalMs
+                )
         );
+    }
 
-        return [];
+    /*
+     * We do not necessarily fail here.
+     *
+     * The bridge may already exist but its READY message
+     * may have been emitted before this listener was added.
+     *
+     * The actual request below will provide the definitive
+     * error if the bridge is unavailable.
+     */
+}
+
+async function loadEntireConversation(): Promise<Message[]> {
+    await waitForBridge();
+
+    const conversationId =
+        getConversationIdFromUrl();
+
+    if (!conversationId) {
+        throw new Error(
+            "Could not determine the ChatGPT conversation ID from the current URL."
+        );
     }
 
     console.log(
-        "GPTExport: scroll container found"
+        "GPTExport: API conversation ID",
+        conversationId
     );
 
     /*
      * -----------------------------------------------------
-     * USER MESSAGE IDs
+     * COLLECTED MESSAGES
      * -----------------------------------------------------
-     *
-     * ChatGPT currently does not expose a stable
-     * data-message-id for user messages.
-     *
-     * WeakMap gives every DOM element a stable ID while
-     * that element exists.
      */
-    let userCounter = 0;
 
-    const userIds =
-        new WeakMap<Element, string>();
+    const collected =
+        new Map<string, ApiMessage>();
 
     /*
      * -----------------------------------------------------
-     * MESSAGE ELEMENTS
+     * COLLECT PAGE
      * -----------------------------------------------------
      */
-    function getMessageElements(): Element[] {
-        return Array.from(
-            document.querySelectorAll(
-                '[data-message-author-role="assistant"], .text-message'
-            )
+
+    const collectPage = (
+        currentPage: ConversationPage
+    ): void => {
+        const messages =
+            currentPage.messages ?? [];
+
+        console.log(
+            "GPTExport: API page contains",
+            messages.length,
+            "raw messages"
         );
-    }
 
-    /*
-     * -----------------------------------------------------
-     * MESSAGE ID
-     * -----------------------------------------------------
-     */
-    function getMessageId(
-        element: Element
-    ): string | null {
-        const assistantId =
-            element.getAttribute(
-                "data-message-id"
-            );
+        for (
+            const message
+            of messages
+        ) {
+            const id =
+                message.id;
 
-        if (assistantId) {
-            return assistantId;
-        }
+            const role =
+                message.author?.role;
 
-        if (!userIds.has(element)) {
-            userIds.set(
-                element,
-                `user-${userCounter++}`
-            );
-        }
-
-        return userIds.get(element) ?? null;
-    }
-
-    /*
-     * -----------------------------------------------------
-     * MESSAGE EXTRACTION
-     * -----------------------------------------------------
-     */
-    function getMessage(
-        element: Element
-    ): Message | null {
-        const isAssistant =
-            element.matches(
-                '[data-message-author-role="assistant"]'
-            );
-
-        const role: Message["role"] =
-            isAssistant
-                ? "assistant"
-                : "user";
-
-        const id =
-            getMessageId(element);
-
-        if (!id) {
-            return null;
-        }
-
-        let content:
-            | string
-            | undefined;
-
-        if (isAssistant) {
-            content =
-                element
-                    .querySelector(".markdown")
-                    ?.textContent
-                    ?.trim();
-        } else {
-            content =
-                element
-                    .querySelector(
-                        ".user-message-bubble-color"
-                    )
-                    ?.textContent
-                    ?.trim();
-        }
-
-        if (!content) {
-            return null;
-        }
-
-        return {
-            id,
-            role,
-            content,
-            order: 0
-        };
-    }
-
-    /*
-     * -----------------------------------------------------
-     * ORDERING RELATIONSHIPS
-     * -----------------------------------------------------
-     *
-     * For every visible batch:
-     *
-     * A B C
-     *
-     * we record:
-     *
-     * A -> B
-     * A -> C
-     * B -> C
-     *
-     * This allows the final conversation order to be
-     * reconstructed after virtualization.
-     */
-    const before =
-        new Map<string, Set<string>>();
-
-    /*
-     * -----------------------------------------------------
-     * COLLECT CURRENT DOM
-     * -----------------------------------------------------
-     */
-    function collectVisibleMessages(): {
-        message: Message;
-        element: Element;
-        top: number;
-    }[] {
-        const elements =
-            getMessageElements();
-
-        const visible: {
-            message: Message;
-            element: Element;
-            top: number;
-        }[] = [];
-
-        for (const element of elements) {
-            const message =
-                getMessage(element);
-
-            if (!message) {
+            /*
+             * Only user and assistant messages.
+             */
+            if (!id) {
                 continue;
             }
 
-            if (!collected.has(message.id)) {
+            if (
+                role !== "user" &&
+                role !== "assistant"
+            ) {
+                continue;
+            }
+
+            /*
+             * Skip messages that ChatGPT marks as hidden
+             * from the visible conversation.
+             */
+            if (
+                message.metadata
+                    ?.is_visually_hidden_from_conversation
+            ) {
+                continue;
+            }
+
+            const content =
+                extractApiMessageText(
+                    message
+                );
+
+            if (!content) {
+                continue;
+            }
+
+            /*
+             * Deduplicate using the API message ID.
+             */
+            if (
+                !collected.has(id)
+            ) {
                 collected.set(
-                    message.id,
+                    id,
                     message
                 );
 
                 console.log(
-                    "GPTExport: collected",
-                    message.role,
-                    message.content.substring(
+                    "GPTExport: API collected",
+                    role,
+                    id,
+                    content.substring(
                         0,
                         70
                     )
                 );
             }
-
-            const rect =
-                element.getBoundingClientRect();
-
-            visible.push({
-                message,
-                element,
-                top: rect.top
-            });
         }
+    };
 
-        /*
-         * Sort by actual vertical position.
-         */
-        visible.sort(
-            (a, b) =>
-                a.top - b.top
+    /*
+     * -----------------------------------------------------
+     * INITIAL PAGE
+     * -----------------------------------------------------
+     */
+
+    const initialUrl =
+        `/backend-api/conversations/${conversationId}` +
+        `?include_has_versions=true&num_turns=10`;
+
+    let page =
+        await fetchConversationPage(
+            initialUrl
         );
 
-        /*
-         * Record ordering relationships.
-         */
-        for (
-            let i = 0;
-            i < visible.length;
-            i++
-        ) {
-            const currentId =
-                visible[i].message.id;
+    let pageNumber = 0;
 
-            if (!before.has(currentId)) {
-                before.set(
-                    currentId,
-                    new Set()
-                );
-            }
+    collectPage(page);
 
-            for (
-                let j = i + 1;
-                j < visible.length;
-                j++
-            ) {
-                const followingId =
-                    visible[j].message.id;
+    console.log(
+        `GPTExport: API page ${pageNumber}, ` +
+        `collected=${collected.size}`
+    );
 
-                before
-                    .get(currentId)!
-                    .add(followingId);
-            }
+    /*
+     * -----------------------------------------------------
+     * PAGINATION
+     * -----------------------------------------------------
+     */
+
+    const seenCursors =
+        new Set<string>();
+
+    while (
+        page.page_info
+            ?.has_previous_page === true
+    ) {
+        const cursor =
+            page.page_info
+                .start_cursor;
+
+        if (!cursor) {
+            throw new Error(
+                "ChatGPT reported that previous pages exist, but no pagination cursor was returned."
+            );
         }
 
-        return visible;
-    }
+        /*
+         * Prevent infinite loops if the API returns
+         * the same cursor twice.
+         */
+        if (
+            seenCursors.has(
+                cursor
+            )
+        ) {
+            throw new Error(
+                "ChatGPT returned a repeated pagination cursor. Pagination was stopped to prevent an infinite loop."
+            );
+        }
 
-    /*
-     * -----------------------------------------------------
-     * SCROLL TO BOTTOM FIRST
-     * -----------------------------------------------------
-     *
-     * If the user has manually scrolled the page (up to an
-     * older point, or anywhere that isn't the very bottom)
-     * before clicking Copy/Export, the upward scroll loop
-     * below would start from that arbitrary position and
-     * only ever collect messages between there and the top -
-     * silently missing everything below it, including the
-     * newest messages. Confirmed by testing: scrolling
-     * manually to the middle of a 12-message conversation
-     * before exporting produced only 6 collected messages,
-     * exactly the ones between the manual scroll position
-     * and the top.
-     *
-     * Forcing scrollTop to the max first (with a dispatched
-     * scroll event, same as every other programmatic scroll
-     * in this file - see scrollAndDispatch) guarantees the
-     * upward pass always starts from the true end of the
-     * conversation, regardless of where the user's own
-     * scrolling left the page.
-     */
-    const heightBeforeBottomScroll =
-        scrollContainer.scrollHeight;
+        seenCursors.add(
+            cursor
+        );
 
-    scrollAndDispatch(
-        scrollContainer,
-        scrollContainer.scrollHeight
-    );
+        pageNumber++;
 
-    /*
-     * Poll instead of a fixed wait - see
-     * waitForHeightChange for why this matters
-     * specifically for background tabs. 5000ms cap is
-     * generous since this only runs once per export.
-     */
-    await waitForHeightChange(
-        scrollContainer,
-        heightBeforeBottomScroll,
-        2500
-    );
+        const nextUrl =
+            `/backend-api/conversations/${conversationId}/messages` +
+            `?before=${encodeURIComponent(cursor)}` +
+            `&include_has_versions=true&num_turns=10`;
 
-    /*
-     * -----------------------------------------------------
-     * INITIAL COLLECTION
-     * -----------------------------------------------------
-     */
-    collectVisibleMessages();
+        page =
+            await fetchConversationPage(
+                nextUrl
+            );
 
-    /*
-     * -----------------------------------------------------
-     * SCROLL STATE
-     * -----------------------------------------------------
-     */
-    ;
-
-    let previousScrollHeight =
-        scrollContainer.scrollHeight;
-
-    let stableTopIterations = 0;
-
-    /*
-     * Maximum iterations is deliberately generous.
-     *
-     * This is important for very long conversations where
-     * ChatGPT may render many virtualized batches.
-     */
-    const MAX_ITERATIONS = 250;
-
-    /*
-     * Number of consecutive checks required before we
-     * decide that there really are no more older messages.
-     */
-    const REQUIRED_STABLE_ROUNDS = 3;
-
-    /*
-     * -----------------------------------------------------
-     * MAIN SCROLL LOOP
-     * -----------------------------------------------------
-     */
-    for (
-        let iteration = 0;
-        iteration < MAX_ITERATIONS;
-        iteration++
-    ) {
-        const currentScrollTop =
-            scrollContainer.scrollTop;
-
-        const currentScrollHeight =
-            scrollContainer.scrollHeight;
-
-        const visible =
-            collectVisibleMessages();
+        collectPage(page);
 
         console.log(
-            `GPTExport: iteration ${iteration}, ` +
-            `scrollTop=${currentScrollTop}, ` +
-            `scrollHeight=${currentScrollHeight}, ` +
-            `visible=${visible.length}, ` +
+            `GPTExport: API page ${pageNumber}, ` +
             `collected=${collected.size}`
         );
 
         /*
-         * -------------------------------------------------
-         * TOP / VIRTUALIZATION BOUNDARY
-         * -------------------------------------------------
-         *
-         * scrollTop === 0 does NOT necessarily mean that
-         * the whole conversation is loaded.
-         *
-         * It can mean that ChatGPT has reached the top of
-         * the currently mounted virtualized batch.
-         *
-         * Therefore we force a small movement and dispatch
-         * a real scroll event.
+         * Optional progress notification.
          */
-        if (currentScrollTop <= 5) {
-            console.log(
-                "GPTExport: current render boundary reached"
-            );
-
-            const heightBefore =
-                scrollContainer.scrollHeight;
-
-            const collectedBefore =
-                collected.size;
-
-            /*
-             * Nudge away from zero.
-             */
-            scrollAndDispatch(
-                scrollContainer,
-                40
-            );
-
-            await wait(150);
-
-            /*
-             * Return to zero and dispatch another event.
-             */
-            scrollAndDispatch(
-                scrollContainer,
-                0
-            );
-
-            const heightBeforeNudge =
-                scrollContainer.scrollHeight;
-
-            /*
-             * Give ChatGPT's React renderer time to:
-             *
-             * - process the scroll event
-             * - mount older messages
-             * - change scrollHeight
-             * - perform scroll anchoring
-             *
-             * Polling instead of a fixed wait matters
-             * most right here: this check decides whether
-             * we conclude the conversation is fully
-             * loaded. A background-throttled render that
-             * simply needs more time must not be
-             * mistaken for "nothing more to load" -
-             * confirmed by testing that a fixed 1200ms
-             * wait was sometimes too short in a
-             * background tab, causing the loop to stop
-             * with only a fraction of the conversation
-             * collected.
-             */
-            await waitForHeightChange(
-                scrollContainer,
-                heightBeforeNudge,
-                2000
-            );
-
-            /*
-             * Collect anything that appeared.
-             */
-            collectVisibleMessages();
-
-            const heightAfter =
-                scrollContainer.scrollHeight;
-
-            const collectedAfter =
-                collected.size;
-
-            const heightChanged =
-                heightAfter >
-                heightBefore + 10;
-
-            const messagesChanged =
-                collectedAfter >
-                collectedBefore;
-
-            console.log(
-                "GPTExport: boundary result",
+        try {
+            chrome.runtime.sendMessage(
                 {
-                    heightBefore,
-                    heightAfter,
-                    heightChanged,
-                    collectedBefore,
-                    collectedAfter,
-                    messagesChanged,
-                    scrollTop:
-                        scrollContainer.scrollTop
+                    type:
+                        "EXPORT_PROGRESS",
+                    collected:
+                        collected.size
                 }
             );
-
+        } catch {
             /*
-             * -------------------------------------------------
-             * NEW BATCH WAS RENDERED
-             * -------------------------------------------------
-             *
-             * This is the critical case.
-             *
-             * If scrollHeight increased, ChatGPT mounted
-             * another portion of the conversation.
-             *
-             * DO NOT terminate.
+             * Progress reporting must never
+             * break the export.
              */
-            if (
-                heightChanged ||
-                messagesChanged
-            ) {
-                console.log(
-                    "GPTExport: older batch rendered, continuing"
-                );
-
-                stableTopIterations = 0;
-
-                
-
-                previousScrollHeight =
-                    heightAfter;
-
-                continue;
-            }
-
-            /*
-             * -------------------------------------------------
-             * NOTHING CHANGED
-             * -------------------------------------------------
-             *
-             * We only start counting stable rounds if:
-             *
-             * - scrollTop is still at/near zero
-             * - scrollHeight did not grow
-             * - collected message count did not grow
-             */
-            if (
-                scrollContainer.scrollTop <= 5 &&
-                heightAfter <=
-                    heightBefore + 10 &&
-                collectedAfter ===
-                    collectedBefore
-            ) {
-                stableTopIterations++;
-
-                console.log(
-                    `GPTExport: stable top round ` +
-                    `${stableTopIterations}/${REQUIRED_STABLE_ROUNDS}`
-                );
-            } else {
-                stableTopIterations = 0;
-            }
-
-            /*
-             * Only after several completely stable rounds
-             * do we conclude that we have reached the actual
-             * beginning of the conversation.
-             */
-            if (
-                stableTopIterations >=
-                REQUIRED_STABLE_ROUNDS
-            ) {
-                console.log(
-                    "GPTExport: conversation beginning confirmed"
-                );
-
-                break;
-            }
-
-            /*
-             * Continue the loop.
-             */
-            
-
-            previousScrollHeight =
-                heightAfter;
-
-            continue;
         }
-
-        /*
-         * -----------------------------------------------------
-         * NORMAL SCROLL UP
-         * -----------------------------------------------------
-         */
-        const scrollAmount =
-            scrollContainer.clientHeight *
-            0.65;
-
-        const nextScrollTop =
-            Math.max(
-                0,
-                currentScrollTop -
-                    scrollAmount
-            );
-
-        console.log(
-            "GPTExport: scrolling",
-            {
-                from:
-                    currentScrollTop,
-                to:
-                    nextScrollTop
-            }
-        );
-
-        /*
-         * Use helper instead of assigning scrollTop
-         * directly.
-         */
-        scrollAndDispatch(
-            scrollContainer,
-            nextScrollTop
-        );
-
-        /*
-         * Wait for React / virtualization, but adaptively
-         * instead of a flat delay. Most scroll steps just
-         * reveal content that's already mounted (fast -
-         * settles in well under 200ms), while occasional
-         * steps trigger an actual batch load (slower,
-         * especially in a background tab). A flat wait
-         * long enough for the slow case makes every single
-         * step pay the slow-case cost, which is what made
-         * a 12-message conversation take way too long.
-         * waitForQuiet resolves as soon as the DOM stops
-         * changing for quietMs, so fast steps finish fast
-         * and only genuinely slow steps use more of the
-         * maxMs budget.
-         */
-        await waitForQuiet(
-            scrollContainer,
-            120,
-            1800
-        );
-
-        /*
-         * Collect after render.
-         */
-        collectVisibleMessages();
-
-        /*
-         * -----------------------------------------------------
-         * DETECT RENDER-INDUCED JUMPS
-         * -----------------------------------------------------
-         *
-         * ChatGPT may change scrollTop after inserting
-         * older messages because of scroll anchoring.
-         *
-         * That is expected.
-         *
-         * We DO NOT treat a jump as an error.
-         */
-        const afterScrollTop =
-            scrollContainer.scrollTop;
-
-        const afterScrollHeight =
-            scrollContainer.scrollHeight;
-
-        if (
-            Math.abs(
-                afterScrollTop -
-                    nextScrollTop
-            ) > 500
-        ) {
-            console.log(
-                "GPTExport: virtualization adjusted scroll position",
-                {
-                    requested:
-                        nextScrollTop,
-                    actual:
-                        afterScrollTop,
-                    scrollHeight:
-                        afterScrollHeight
-                }
-            );
-        }
-
-        /*
-         * -----------------------------------------------------
-         * RENDER HEIGHT CHANGE
-         * -----------------------------------------------------
-         */
-        if (
-            afterScrollHeight !==
-            previousScrollHeight
-        ) {
-            console.log(
-                "GPTExport: scrollHeight changed",
-                {
-                    previous:
-                        previousScrollHeight,
-                    current:
-                        afterScrollHeight
-                }
-            );
-        }
-
-
-        previousScrollHeight =
-            afterScrollHeight;
-
-        /*
-         * Reset top stability because we are actively
-         * moving through the conversation.
-         */
-        stableTopIterations = 0;
     }
 
     /*
      * -----------------------------------------------------
-     * FINAL COLLECTION
+     * SORT CHRONOLOGICALLY
      * -----------------------------------------------------
+     *
+     * API pagination is newest -> oldest.
+     * create_time lets us restore chronological order.
      */
-    await wait(1500);
-
-    collectVisibleMessages();
 
     const messages =
         Array.from(
             collected.values()
-        );
+        ).sort(
+            (a, b) => {
+                const aTime =
+                    a.create_time ??
+                    Number.MAX_SAFE_INTEGER;
 
-    console.log(
-        `GPTExport: collected ${messages.length} unique messages`
-    );
+                const bTime =
+                    b.create_time ??
+                    Number.MAX_SAFE_INTEGER;
+
+                return (
+                    aTime - bTime
+                );
+            }
+        );
 
     /*
      * -----------------------------------------------------
-     * TOPOLOGICAL SORT
+     * CONVERT TO EXPORT FORMAT
      * -----------------------------------------------------
      */
-    const incoming =
-        new Map<string, number>();
 
-    for (const message of messages) {
-        incoming.set(
-            message.id,
-            0
-        );
-    }
+    const result: Message[] =
+        [];
 
-    /*
-     * Count incoming relationships.
-     */
     for (
-        const followingMessages
-        of before.values()
-    ) {
-        for (
-            const followingId
-            of followingMessages
-        ) {
-            incoming.set(
-                followingId,
-                (incoming.get(followingId) ?? 0) + 1
-            );
-        }
-    }
-
-    /*
-     * Start with messages that have no predecessors.
-     */
-    const queue: string[] = [];
-
-    for (const message of messages) {
-        if (
-            (incoming.get(message.id) ?? 0) === 0
-        ) {
-            queue.push(
-                message.id
-            );
-        }
-    }
-
-    const orderedIds: string[] = [];
-
-    /*
-     * Topological sort.
-     */
-    while (
-        queue.length > 0
+        const message
+        of messages
     ) {
         const id =
-            queue.shift()!;
+            message.id;
 
-        orderedIds.push(id);
+        const role =
+            message.author?.role;
 
-        const followingMessages =
-            before.get(id);
+        const content =
+            extractApiMessageText(
+                message
+            );
 
-        if (!followingMessages) {
+        if (
+            !id ||
+            (
+                role !== "user" &&
+                role !== "assistant"
+            ) ||
+            !content
+        ) {
             continue;
         }
 
-        for (
-            const followingId
-            of followingMessages
-        ) {
-            const count =
-                (incoming.get(followingId) ?? 0) - 1;
-
-            incoming.set(
-                followingId,
-                count
-            );
-
-            if (count === 0) {
-                queue.push(
-                    followingId
-                );
+        result.push(
+            {
+                id,
+                role,
+                content,
+                order:
+                    result.length
             }
-        }
-    }
-
-    /*
-     * -----------------------------------------------------
-     * BUILD FINAL ARRAY
-     * -----------------------------------------------------
-     */
-    const messageById =
-        new Map(
-            messages.map(
-                message => [
-                    message.id,
-                    message
-                ]
-            )
         );
-
-    const orderedMessages: Message[] = [];
-
-    for (
-        const id of orderedIds
-    ) {
-        const message =
-            messageById.get(id);
-
-        if (message) {
-            orderedMessages.push(
-                message
-            );
-        }
     }
-
-    /*
-     * -----------------------------------------------------
-     * SAFETY FALLBACK
-     * -----------------------------------------------------
-     */
-    if (
-        orderedMessages.length !==
-        messages.length
-    ) {
-        console.warn(
-            "GPTExport: topological sort did not include all messages"
-        );
-
-        for (
-            const message of messages
-        ) {
-            if (
-                !orderedMessages.some(
-                    existing =>
-                        existing.id ===
-                        message.id
-                )
-            ) {
-                orderedMessages.push(
-                    message
-                );
-            }
-        }
-    }
-
-    /*
-     * -----------------------------------------------------
-     * NORMALIZE ORDER
-     * -----------------------------------------------------
-     */
-    orderedMessages.forEach(
-        (message, index) => {
-            message.order =
-                index;
-        }
-    );
 
     /*
      * -----------------------------------------------------
      * FINAL LOG
      * -----------------------------------------------------
      */
+
     console.log(
-        "GPTExport: final conversation order"
+        "GPTExport: API export complete",
+        {
+            conversationId,
+            pages:
+                pageNumber + 1,
+            messages:
+                result.length
+        }
     );
 
-    orderedMessages.forEach(
-        (message, index) => {
+    result.forEach(
+        (
+            message,
+            index
+        ) => {
             console.log(
                 `${index + 1} ${message.role}:`,
                 message.content.substring(
@@ -1095,12 +767,7 @@ async function loadEntireConversation(): Promise<Message[]> {
         }
     );
 
-    console.log(
-        "GPTExport: final messages",
-        orderedMessages
-    );
-
-    return orderedMessages;
+    return result;
 }
 
 /*
@@ -1108,77 +775,73 @@ async function loadEntireConversation(): Promise<Message[]> {
  * READY
  * ---------------------------------------------------------
  */
+
+console.log(
+    "GPTExport loaded"
+);
+
 console.log(
     "GPTExport: ready"
 );
 
 window.postMessage(
     {
-        source: "GPTExport",
-        type: "READY"
+        source:
+            "GPTExport",
+        type:
+            "READY"
     },
     "*"
 );
 
 /*
  * ---------------------------------------------------------
- * CHROME MESSAGE HANDLER
- * ---------------------------------------------------------
- */
-/*
- * ---------------------------------------------------------
  * CONCURRENCY GUARD
  * ---------------------------------------------------------
  *
- * loadEntireConversation() scrolls the live page and reads
- * DOM positions (getBoundingClientRect) to reconstruct
- * message order. If a second LOAD_CONVERSATION message
- * arrives while a run is still in progress - e.g. the popup
- * gets clicked more than once, or a background/throttled
- * tab is slow to respond so the popup retries - a second
- * run starts scrolling and collecting against the SAME DOM
- * at the same time. The two runs' snapshots interleave
- * randomly, which is exactly what produced results where
- * every message had "order: 0": the topological sort ran
- * against a "before" graph built from two different runs'
- * positions, which is meaningless.
- *
- * Instead of letting a second call start a second scroll
- * pass, any LOAD_CONVERSATION that arrives while a run is
- * already in flight just awaits and returns the SAME
- * in-progress result. This guarantees only one
- * loadEntireConversation() ever touches the DOM at a time,
- * regardless of how many times the message fires.
+ * If popup sends LOAD_CONVERSATION more than once,
+ * only one API pagination run is performed.
  */
-let inFlightLoad: Promise<Message[]> | null = null;
 
-function loadEntireConversationSingleFlight(): Promise<Message[]> {
+let inFlightLoad:
+    Promise<Message[]> | null =
+        null;
+
+function loadEntireConversationSingleFlight():
+    Promise<Message[]> {
     if (inFlightLoad) {
         console.log(
-            "GPTExport: LOAD_CONVERSATION already in " +
-            "progress, reusing existing run instead of " +
-            "starting a second one"
+            "GPTExport: LOAD_CONVERSATION already in progress, reusing existing run"
         );
 
         return inFlightLoad;
     }
 
-    const run = loadEntireConversation().finally(() => {
-        /*
-         * Only clear the slot if we're still the current
-         * run (defensive; in practice always true since
-         * this is single-threaded JS, but keeps intent
-         * explicit).
-         */
-        if (inFlightLoad === run) {
-            inFlightLoad = null;
-        }
-    });
+    const run =
+        loadEntireConversation()
+            .finally(
+                () => {
+                    if (
+                        inFlightLoad ===
+                        run
+                    ) {
+                        inFlightLoad =
+                            null;
+                    }
+                }
+            );
 
-    inFlightLoad = run;
+    inFlightLoad =
+        run;
 
     return run;
 }
+
+/*
+ * ---------------------------------------------------------
+ * CHROME MESSAGE HANDLER
+ * ---------------------------------------------------------
+ */
 
 chrome.runtime.onMessage.addListener(
     (
@@ -1192,7 +855,7 @@ chrome.runtime.onMessage.addListener(
             message.type !==
             "LOAD_CONVERSATION"
         ) {
-            return;
+            return false;
         }
 
         console.log(
@@ -1200,32 +863,49 @@ chrome.runtime.onMessage.addListener(
         );
 
         loadEntireConversationSingleFlight()
-            .then(result => {
-                console.log(
-                    "GPTExport: sending conversation",
-                    result
-                );
+            .then(
+                result => {
+                    console.log(
+                        "GPTExport: sending conversation",
+                        result
+                    );
 
-                sendResponse({
-                    success: true,
-                    data: result
-                });
-            })
-            .catch(error => {
-                console.error(
-                    "GPTExport: failed to load conversation",
-                    error
-                );
+                    sendResponse(
+                        {
+                            success:
+                                true,
+                            data:
+                                result
+                        }
+                    );
+                }
+            )
+            .catch(
+                error => {
+                    console.error(
+                        "GPTExport: failed to load conversation",
+                        error
+                    );
 
-                sendResponse({
-                    success: false,
-                    error: String(error)
-                });
-            });
+                    sendResponse(
+                        {
+                            success:
+                                false,
+                            error:
+                                error instanceof
+                                Error
+                                    ? error.message
+                                    : String(
+                                          error
+                                      )
+                        }
+                    );
+                }
+            );
 
         /*
          * Keep the Chrome message channel open while
-         * loadEntireConversation() is awaiting.
+         * the asynchronous operation is running.
          */
         return true;
     }

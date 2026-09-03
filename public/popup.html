@@ -1,108 +1,108 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>GPTExport</title>
     <style>
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-            width: 220px;
-            padding: 12px;
-            margin: 0;
-        }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        width: 220px;
+        padding: 12px;
+        margin: 0;
+      }
 
-        button {
-            display: block;
-            width: 100%;
-            padding: 8px 10px;
-            border: 1px solid #d0d0d0;
-            border-radius: 6px;
-            background: #ffffff;
-            cursor: pointer;
-            font-size: 13px;
-        }
+      button {
+        display: block;
+        width: 100%;
+        padding: 8px 10px;
+        border: 1px solid #d0d0d0;
+        border-radius: 6px;
+        background: #ffffff;
+        cursor: pointer;
+        font-size: 13px;
+      }
 
-        button:hover:not(:disabled) {
-            background: #f4f4f4;
-        }
+      button:hover:not(:disabled) {
+        background: #f4f4f4;
+      }
 
-        button:disabled {
-            cursor: default;
-            opacity: 0.7;
-        }
+      button:disabled {
+        cursor: default;
+        opacity: 0.7;
+      }
 
-        #copy {
-            background: #10a37f;
-            color: #ffffff;
-            border-color: #10a37f;
-            margin-bottom: 8px;
-        }
+      #copy {
+        background: #10a37f;
+        color: #ffffff;
+        border-color: #10a37f;
+        margin-bottom: 8px;
+      }
 
-        #copy:hover:not(:disabled) {
-            background: #0d8e6d;
-        }
+      #copy:hover:not(:disabled) {
+        background: #0d8e6d;
+      }
 
-        #export-wrapper {
-            position: relative;
-        }
+      #export-wrapper {
+        position: relative;
+      }
 
-        #export-menu {
-            display: none;
-            position: absolute;
-            top: calc(100% + 4px);
-            left: 0;
-            right: 0;
-            background: #ffffff;
-            border: 1px solid #d0d0d0;
-            border-radius: 6px;
-            overflow: hidden;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-            z-index: 10;
-        }
+      #export-menu {
+        display: none;
+        position: absolute;
+        top: calc(100% + 4px);
+        left: 0;
+        right: 0;
+        background: #ffffff;
+        border: 1px solid #d0d0d0;
+        border-radius: 6px;
+        overflow: hidden;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+        z-index: 10;
+      }
 
-        #export-menu.open {
-            display: block;
-        }
+      #export-menu.open {
+        display: block;
+      }
 
-        #export-menu button {
-            border: none;
-            border-radius: 0;
-            text-align: left;
-            margin-bottom: 0;
-        }
+      #export-menu button {
+        border: none;
+        border-radius: 0;
+        text-align: left;
+        margin-bottom: 0;
+      }
 
-        #export-menu button:not(:last-child) {
-            border-bottom: 1px solid #eeeeee;
-        }
+      #export-menu button:not(:last-child) {
+        border-bottom: 1px solid #eeeeee;
+      }
 
-        .footer-link {
-            display: block;
-            text-align: center;
-            margin-top: 10px;
-            font-size: 11px;
-            color: #888888;
-            text-decoration: none;
-        }
+      .footer-link {
+        display: block;
+        text-align: center;
+        margin-top: 10px;
+        font-size: 11px;
+        color: #888888;
+        text-decoration: none;
+      }
 
-        .footer-link:hover {
-            text-decoration: underline;
-        }
+      .footer-link:hover {
+        text-decoration: underline;
+      }
     </style>
-</head>
-<body>
+  </head>
+  <body>
     <button id="copy">Copy Conversation</button>
 
     <div id="export-wrapper">
-        <button id="export">Export Conversation ▾</button>
-        <div id="export-menu">
-            <button id="export-md">Export as .md</button>
-            <button id="export-txt">Export as .txt</button>
-        </div>
+      <button id="export">Export Conversation ▾</button>
+      <div id="export-menu">
+        <button id="export-md">Export as .md</button>
+        <button id="export-txt">Export as .txt</button>
+      </div>
     </div>
 
     <a class="footer-link" id="options-link" href="#">Settings</a>
 
     <script type="module" src="/popup.js"></script>
-</body>
+  </body>
 </html>

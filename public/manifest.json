@@ -1,54 +1,46 @@
 {
-    "manifest_version": 3,
-    "name": "GPTExport",
-    "version": "0.2.0",
-    "description": "Export ChatGPT conversations as Markdown.",
+  "manifest_version": 3,
+  "name": "GPTExport",
+  "version": "0.2.0",
+  "description": "Export ChatGPT conversations as Markdown.",
 
-    "icons": {
-        "16": "icons/icon16.png"
-    },
+  "icons": {
+    "16": "icons/icon16.png"
+  },
 
-    "permissions": [
-        "activeTab",
-        "clipboardWrite",
-        "offscreen",
-        "downloads",
-        "storage"
-    ],
+  "permissions": [
+    "activeTab",
+    "clipboardWrite",
+    "offscreen",
+    "downloads",
+    "storage"
+  ],
 
-    "background": {
-        "service_worker": "background.js"
-    },
+  "background": {
+    "service_worker": "background.js"
+  },
 
-    "content_scripts": [
-        {
-            "matches": [
-                "https://chatgpt.com/*"
-            ],
-            "js": [
-                "content.js"
-            ]
-        }
-    ],
+  "content_scripts": [
+    {
+      "matches": ["https://chatgpt.com/*"],
+      "js": ["content.js"]
+    }
+  ],
 
-    "web_accessible_resources": [
-        {
-            "resources": [
-                "pageBridge.js"
-            ],
-            "matches": [
-                "https://chatgpt.com/*"
-            ]
-        }
-    ],
+  "web_accessible_resources": [
+    {
+      "resources": ["pageBridge.js"],
+      "matches": ["https://chatgpt.com/*"]
+    }
+  ],
 
-    "action": {
-        "default_title": "GPTExport",
-        "default_popup": "popup.html",
-        "default_icon": {
-            "16": "icons/icon16.png"
-        }
-    },
+  "action": {
+    "default_title": "GPTExport",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png"
+    }
+  },
 
-    "options_page": "options.html"
+  "options_page": "options.html"
 }

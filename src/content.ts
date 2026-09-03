@@ -70,7 +70,13 @@ interface Message {
 interface ApiMessage {
   id?: string;
 
+  message?: ApiMessage | null;
+
+  parent?: string | null;
+
   parent_message_id?: string | null;
+
+  parent_id?: string | null;
 
   children?: string[];
 
@@ -95,12 +101,27 @@ interface ApiMessage {
 
   metadata?: {
     is_visually_hidden_from_conversation?: boolean;
+    parent_id?: string | null;
+    parent_message_id?: string | null;
+    request_id?: string | null;
+    turn_exchange_id?: string | null;
     [key: string]: unknown;
   };
 }
 
+interface ApiMappingNode {
+  id?: string;
+  parent?: string | null;
+  children?: string[];
+  message?: ApiMessage | null;
+}
+
 interface ConversationPage {
   messages?: ApiMessage[];
+
+  mapping?: Record<string, ApiMappingNode>;
+
+  current_node?: string | null;
 
   page_info?: {
     start_cursor?: string | null;
@@ -108,6 +129,257 @@ interface ConversationPage {
     has_previous_page?: boolean;
     has_next_page?: boolean;
   };
+}
+
+function normalizeConversationPage(page: ConversationPage): ConversationPage {
+  if (page.mapping) {
+    const messages: ApiMessage[] = [];
+
+    for (const [nodeId, node] of Object.entries(page.mapping)) {
+      if (!node.message) {
+        messages.push({
+          id: nodeId,
+          parent: node.parent,
+          children: node.children,
+        });
+        continue;
+      }
+
+      messages.push({
+        ...node.message,
+        id: node.message.id ?? nodeId,
+        parent: node.parent ?? node.message.parent,
+        children: node.children ?? node.message.children,
+      });
+    }
+
+    return {
+      ...page,
+      messages,
+    };
+  }
+
+  const nestedMessages = page.messages?.filter(
+    (message) => message.message !== null && message.message !== undefined,
+  );
+
+  if (!nestedMessages || nestedMessages.length === 0) {
+    return page;
+  }
+
+  const messages: ApiMessage[] = [];
+
+  for (const rawNode of page.messages ?? []) {
+    const node = rawNode as ApiMappingNode;
+    messages.push({
+      ...(node.message ?? {}),
+      id: node.message?.id ?? node.id ?? rawNode.id,
+      parent: node.parent ?? node.message?.parent,
+      children: node.children ?? node.message?.children,
+    });
+  }
+
+  return {
+    ...page,
+    messages,
+  };
+}
+
+function getApiMessageParentId(message: ApiMessage): string | null {
+  const candidates = [
+    message.parent,
+    message.parent_message_id,
+    message.parent_id,
+    message.metadata?.parent_message_id,
+    message.metadata?.parent_id,
+  ];
+
+  return candidates.find(
+    (candidate): candidate is string => typeof candidate === "string" && candidate.length > 0,
+  ) ?? null;
+}
+
+function getTurnExchangeId(message: ApiMessage): string | null {
+  const value = message.metadata?.turn_exchange_id;
+
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function getApiMessageTime(message: ApiMessage): number {
+  return message.create_time ?? Number.MAX_SAFE_INTEGER;
+}
+
+function resolveActiveMessages(
+  rawById: Map<string, ApiMessage>,
+  collected: Map<string, ApiMessage>,
+  currentNode: string | null,
+): ApiMessage[] {
+  const exportable = Array.from(collected.values());
+  const turnGroups = new Map<
+    string,
+    { user?: ApiMessage; assistant?: ApiMessage }
+  >();
+
+  for (const message of exportable) {
+    const turnId = getTurnExchangeId(message);
+
+    if (!turnId) {
+      continue;
+    }
+
+    const group = turnGroups.get(turnId) ?? {};
+
+    if (message.author?.role === "user") {
+      group.user = message;
+    } else if (message.author?.role === "assistant") {
+      group.assistant = message;
+    }
+
+    turnGroups.set(turnId, group);
+  }
+
+  const completeTurns = Array.from(turnGroups.values()).filter(
+    (turn): turn is { user: ApiMessage; assistant: ApiMessage } =>
+      Boolean(turn.user && turn.assistant),
+  );
+
+  if (completeTurns.length > 0) {
+    completeTurns.sort(
+      (a, b) => getApiMessageTime(a.assistant) - getApiMessageTime(b.assistant),
+    );
+
+    return completeTurns.flatMap(({ user, assistant }) => [user, assistant]);
+  }
+
+  const users = exportable
+    .filter((message) => message.author?.role === "user")
+    .sort((a, b) => getApiMessageTime(a) - getApiMessageTime(b));
+  const assistants = exportable
+    .filter((message) => message.author?.role === "assistant")
+    .sort((a, b) => getApiMessageTime(a) - getApiMessageTime(b));
+
+  const assistantsByParent = new Map<string, ApiMessage[]>();
+
+  for (const message of exportable) {
+    if (message.author?.role !== "assistant") {
+      continue;
+    }
+
+    const parentId = getApiMessageParentId(message);
+
+    if (!parentId) {
+      continue;
+    }
+
+    const assistants = assistantsByParent.get(parentId) ?? [];
+    assistants.push(message);
+    assistantsByParent.set(parentId, assistants);
+  }
+
+  const currentAssistant = currentNode ? rawById.get(currentNode) : undefined;
+  const currentUserId = currentAssistant
+    ? getApiMessageParentId(currentAssistant)
+    : null;
+  const usedAssistants = new Set<string>();
+  const turns: Array<{
+    user: ApiMessage;
+    assistant?: ApiMessage;
+    order: number;
+  }> = [];
+
+  for (const [userIndex, user] of users.entries()) {
+    if (!user.id) {
+      continue;
+    }
+
+    const candidates = assistantsByParent.get(user.id) ?? [];
+    const mappedAssistant =
+      user.id === currentUserId
+        ? currentAssistant
+        : candidates.sort(
+            (a, b) => getApiMessageTime(b) - getApiMessageTime(a),
+          )[0];
+    const nextUserTime =
+      users[userIndex + 1] === undefined
+        ? Number.POSITIVE_INFINITY
+        : getApiMessageTime(users[userIndex + 1]);
+    const chronologicalAssistant = assistants.find((assistant) => {
+      if (!assistant.id || usedAssistants.has(assistant.id)) {
+        return false;
+      }
+
+      const assistantTime = getApiMessageTime(assistant);
+
+      return (
+        assistantTime >= getApiMessageTime(user) &&
+        assistantTime < nextUserTime
+      );
+    });
+    const nearestAssistant = assistants.find((assistant) => {
+      if (!assistant.id || usedAssistants.has(assistant.id)) {
+        return false;
+      }
+
+      return getApiMessageTime(assistant) >= getApiMessageTime(user);
+    });
+    const assistant = mappedAssistant ?? chronologicalAssistant ?? nearestAssistant;
+
+    const selectedAssistant =
+      assistant &&
+      assistant.id &&
+      !usedAssistants.has(assistant.id) &&
+      isExportableApiMessage(assistant)
+        ? assistant
+        : undefined;
+
+    if (selectedAssistant?.id) {
+      usedAssistants.add(selectedAssistant.id);
+    }
+
+    turns.push({
+      user,
+      assistant: selectedAssistant,
+      order: selectedAssistant
+        ? getApiMessageTime(selectedAssistant)
+        : getApiMessageTime(user),
+    });
+  }
+
+  turns.sort((a, b) => a.order - b.order);
+
+  return turns.flatMap(({ user, assistant }) =>
+    assistant ? [user, assistant] : [user],
+  );
+}
+
+function mergeApiMessages(
+  existing: ApiMessage | undefined,
+  incoming: ApiMessage,
+): ApiMessage {
+  if (!existing) {
+    return incoming;
+  }
+
+  return {
+    ...existing,
+    ...incoming,
+    metadata: {
+      ...existing.metadata,
+      ...incoming.metadata,
+    },
+    children: incoming.children ?? existing.children,
+  };
+}
+
+function isExportableApiMessage(message: ApiMessage): boolean {
+  const role = message.author?.role;
+
+  return (
+    (role === "user" || role === "assistant") &&
+    !message.metadata?.is_visually_hidden_from_conversation &&
+    (role === "user" || message.end_turn === true) &&
+    Boolean(extractApiMessageText(message))
+  );
 }
 
 /*
@@ -249,7 +521,7 @@ function fetchConversationPage(url: string): Promise<ConversationPage> {
 
       cleanup();
 
-      resolve(data.data);
+      resolve(normalizeConversationPage(data.data));
     };
 
     window.addEventListener("message", handleMessage);
@@ -383,6 +655,7 @@ async function loadEntireConversation(): Promise<Message[]> {
    * -----------------------------------------------------
    */
 
+  const rawById = new Map<string, ApiMessage>();
   const collected = new Map<string, ApiMessage>();
 
   /*
@@ -401,79 +674,21 @@ async function loadEntireConversation(): Promise<Message[]> {
     );
 
     for (const message of messages) {
-      console.log("GPTExport DEBUG MESSAGE:", {
-        id: message.id,
-        role: message.author?.role,
-        status: message.status,
-        end_turn: message.end_turn,
-        recipient: message.recipient,
-        channel: message.channel,
-        content_type: message.content?.content_type,
-        metadata: message.metadata,
-        create_time: message.create_time,
-      });
-
       const id = message.id;
 
-      const role = message.author?.role;
-
-      /*
-       * Only user and assistant messages.
-       */
       if (!id) {
         continue;
       }
 
-      if (role !== "user" && role !== "assistant") {
-        continue;
-      }
+      const mergedMessage = mergeApiMessages(rawById.get(id), message);
 
-      if (message.metadata?.is_visually_hidden_from_conversation) {
-        continue;
-      }
+      rawById.set(id, mergedMessage);
 
-      /*
-       * ChatGPT can store multiple intermediate assistant
-       * messages for tool calls / web searches.
-       *
-       * Only the final assistant message of the turn
-       * has end_turn === true.
-       */
-
-      if (role === "assistant" && message.end_turn === true) {
-        console.log("GPTExport DEBUG FINAL ASSISTANT:", {
-          id: message.id,
-          create_time: message.create_time,
-          recipient: message.recipient,
-          channel: message.channel,
-          metadata: message.metadata,
-          content: extractApiMessageText(message).substring(0, 150),
-        });
-      }
-      if (role === "assistant" && message.end_turn !== true) {
-        continue;
-      }
-
-      const content = extractApiMessageText(message);
-
-      if (!content) {
-        continue;
-      }
-
-      /*
-       * Deduplicate using the API message ID.
-       */
-      if (!collected.has(id)) {
-        collected.set(id, message);
-
-        console.log(
-          "GPTExport: API collected",
-          role,
-          id,
-          content.substring(0, 70),
-        );
+      if (isExportableApiMessage(mergedMessage)) {
+        collected.set(id, mergedMessage);
       }
     }
+
   };
 
   /*
@@ -489,6 +704,7 @@ async function loadEntireConversation(): Promise<Message[]> {
   let page = await fetchConversationPage(initialUrl);
 
   let pageNumber = 0;
+  const currentNode = page.current_node ?? null;
 
   collectPage(page);
 
@@ -556,21 +772,18 @@ async function loadEntireConversation(): Promise<Message[]> {
     }
   }
 
-  /*
-   * -----------------------------------------------------
-   * SORT CHRONOLOGICALLY
-   * -----------------------------------------------------
-   *
-   * API pagination is newest -> oldest.
-   * create_time lets us restore chronological order.
-   */
+  const messages = resolveActiveMessages(rawById, collected, currentNode);
 
-  const messages = Array.from(collected.values()).sort((a, b) => {
-    const aTime = a.create_time ?? Number.MAX_SAFE_INTEGER;
+  if (!currentNode) {
+    console.warn(
+      "GPTExport: API response did not include current_node; using chronological fallback",
+    );
+  }
 
-    const bTime = b.create_time ?? Number.MAX_SAFE_INTEGER;
-
-    return aTime - bTime;
+  console.log("GPTExport: resolved active conversation", {
+    currentNode,
+    rawMessages: rawById.size,
+    messages: messages.length,
   });
 
   /*

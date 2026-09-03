@@ -4,12 +4,11 @@ A small Chrome extension that exports a ChatGPT conversation to Markdown and cop
 
 ## Features
 
-- Exports the **entire** conversation, not just what's currently rendered — ChatGPT virtualizes long chats (removes old messages from the DOM as you scroll), so the extension auto-scrolls to the top first and collects every message along the way.
+- Exports the **entire active branch** of a conversation, including messages that are not currently rendered in the page.
 - Preserves formatting: code blocks (with language tags), lists, bold/italic, links, headings, and blockquotes are converted to proper Markdown instead of being flattened to plain text.
 - **Copy to clipboard** or **download as a `.md` file** — the download gets an automatic filename built from the conversation title and today's date.
 - **Settings page** to customize heading style, message spacing, and whether to include an export timestamp.
-- Live progress feedback while scrolling long conversations.
-- Falls back gracefully if ChatGPT changes its layout: the extension tries several known selectors before giving up, and reports a clear error instead of silently exporting nothing.
+- Live progress feedback while loading long conversations from the API.
 - No external requests, no analytics, no permissions beyond what's needed to read the active ChatGPT tab, write to the clipboard, save a file, and store your settings.
 
 ## Installing (unpacked, for development/testing)
@@ -38,7 +37,7 @@ Click **Settings** at the bottom of the popup to customize heading style (`## Us
 
 ## How it works
 
-- **`content.ts`** runs on `chatgpt.com` pages. It scrolls the conversation container to the top, collecting every message it encounters along the way (deduplicated by a stable ID — ChatGPT's own `data-message-id` for assistant replies, a content hash for user messages, since those aren't given a stable ID by the page itself). Message order is reconstructed via a topological sort based on each message's on-screen position at the time it was seen, since virtualization means messages aren't always collected in final reading order.
+- **`content.ts`** runs on `chatgpt.com` pages. It requests all conversation pages through the authenticated page bridge, then follows the API's `current_node` and parent/child links to select the active branch while excluding other regenerated branches.
 - **`popup.ts`** triggers the export and turns the collected messages into a Markdown string.
 - **`background.ts`** + **`offscreen.ts`** handle the clipboard write. Manifest V3 service workers can't access the clipboard directly, so a short-lived offscreen document does it instead.
 
@@ -64,8 +63,7 @@ public/
 ## Limitations
 
 - Only works on `chatgpt.com` (not the legacy `chat.openai.com` domain, which now redirects there anyway).
-- Depends on ChatGPT's current DOM structure (`data-message-author-role`, `.markdown`, `.user-message-bubble-color`, `[data-scroll-root]`). If OpenAI changes these, extraction may break until the extension is updated.
-- Two user messages with byte-for-byte identical text will be treated as the same message (their IDs are derived from content, since the page doesn't expose a stable ID for user turns).
+- Depends on ChatGPT's conversation API response shape, including pagination cursors and the active-node/parent-child relationships. If OpenAI changes these, extraction may break until the extension is updated.
 
 ## Contributing
 
